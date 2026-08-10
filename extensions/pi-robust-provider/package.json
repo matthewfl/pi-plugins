@@ -1,0 +1,12 @@
+{
+	"name": "pi-robust-provider",
+	"version": "0.1.0",
+	"description": "Transport-level robust retry for pi provider streams: registers an openai-completions-retry api that wraps built-in streams with a time-budgeted, broad-matcher retry so flaky servers survive instead of failing.",
+	"type": "module",
+	"license": "MIT",
+	"pi": {
+		"extensions": [
+			"./pi-robust-provider.ts"
+		]
+	}
+}

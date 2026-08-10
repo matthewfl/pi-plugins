@@ -1,0 +1,12 @@
+{
+	"name": "pi-simple-goal",
+	"version": "0.1.0",
+	"description": "Minimal /goal extension for pi: inject goal context and keep the agent working across turns.",
+	"type": "module",
+	"license": "MIT",
+	"pi": {
+		"extensions": [
+			"./goal.ts"
+		]
+	}
+}
