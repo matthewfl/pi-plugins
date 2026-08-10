@@ -1,9 +1,39 @@
 {
-	"name": "pi-robust-provider",
+	"name": "@matthewfl/pi-robust-provider",
 	"version": "0.1.0",
-	"description": "Transport-level robust retry for pi provider streams: registers an openai-completions-retry api that wraps built-in streams with a time-budgeted, broad-matcher retry so flaky servers survive instead of failing.",
+	"description": "Aggressive, transport-level retries for unstable OpenAI-compatible providers used with Pi.",
 	"type": "module",
 	"license": "MIT",
+	"author": "matthewfl",
+	"homepage": "https://github.com/matthewfl/pi-plugins/tree/master/extensions/pi-robust-provider",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/matthewfl/pi-plugins.git",
+		"directory": "extensions/pi-robust-provider"
+	},
+	"bugs": {
+		"url": "https://github.com/matthewfl/pi-plugins/issues"
+	},
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"retry",
+		"llm",
+		"openai-compatible",
+		"network-resilience"
+	],
+	"files": [
+		"pi-robust-provider.ts",
+		"README.md",
+		"LICENSE"
+	],
+	"publishConfig": {
+		"access": "public"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*"
+	},
 	"pi": {
 		"extensions": [
 			"./pi-robust-provider.ts"
