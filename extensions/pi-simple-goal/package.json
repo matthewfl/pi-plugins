@@ -1,9 +1,38 @@
 {
-	"name": "pi-simple-goal",
-	"version": "0.1.0",
-	"description": "Minimal /goal extension for pi: inject goal context and keep the agent working across turns.",
+	"name": "@matthewfl/pi-simple-goal",
+	"version": "0.0.1",
+	"description": "Keep Pi agents working toward a persistent goal with context injection, recovery prompts, and watchdog timers.",
 	"type": "module",
 	"license": "MIT",
+	"author": "matthewfl",
+	"homepage": "https://github.com/matthewfl/pi-plugins/tree/master/extensions/pi-simple-goal",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/matthewfl/pi-plugins.git",
+		"directory": "extensions/pi-simple-goal"
+	},
+	"bugs": {
+		"url": "https://github.com/matthewfl/pi-plugins/issues"
+	},
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"goal",
+		"agent",
+		"watchdog"
+	],
+	"files": [
+		"goal.ts",
+		"README.md",
+		"LICENSE"
+	],
+	"publishConfig": {
+		"access": "public"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*"
+	},
 	"pi": {
 		"extensions": [
 			"./goal.ts"
