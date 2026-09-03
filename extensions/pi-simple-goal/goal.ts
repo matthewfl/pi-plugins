@@ -2,6 +2,10 @@
  * Minimal /goal extension.
  *
  * - `/goal <objective>` sets a goal, persists it in the session, and kicks off work.
+ * - `--goal-set "<goal>"` (or `--goal-set /path/to/file.txt`, contents become
+ *   the goal) seeds the initial goal for a fresh session from the command line
+ *   and starts the agent loop in the TUI. Skipped once the session has any goal
+ *   history, so `/goal clear` survives /reload.
  * - `/goal` shows the current goal.
  * - `/goal clear` removes the goal.
  * - Injects the active goal into the system prompt on every turn.
@@ -28,7 +32,7 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -172,6 +176,10 @@ export default function (pi: ExtensionAPI) {
 	let paused = false;
 	let lastEscapeAt = 0; // last raw Escape observed via the terminal input listener
 	let terminalInputActive = false; // whether onTerminalInput is subscribed (TUI only)
+	// Whether the current branch has ANY simple-goal entries (set or cleared).
+	// Recomputed by restoreGoal; distinguishes "fresh session" (seed --goal-set)
+	// from "goal existed and was cleared/changed" (user's decision wins).
+	let branchGoalEntrySeen = false;
 
 	const settings = loadSettings();
 
@@ -213,6 +221,30 @@ export default function (pi: ExtensionAPI) {
 		"PI_GOAL_NOTIFY_SCRIPT",
 		settings.notifyScript,
 	);
+
+	// --goal-set "<goal>" | --goal-set /path/to/file.txt (env: PI_GOAL_SET):
+	// initial goal seeded into a session that has no goal history yet. Read
+	// lazily on session_start: pi applies argv-driven extension flag values to
+	// the extension runtime only AFTER extensions load (and getFlag requires
+	// the flag to be registered), so a factory-time getFlag() would always miss
+	// a CLI-passed value. A value naming an existing regular file is replaced
+	// by the file's contents (~ expanded, trimmed); anything else is used
+	// verbatim as the goal text.
+	function resolveCliGoal(): string | undefined {
+		const raw =
+			asStr(pi.getFlag("goal-set")) ?? asStr(process.env.PI_GOAL_SET);
+		if (!raw) return undefined;
+		try {
+			const p = expandHome(raw);
+			if (existsSync(p) && statSync(p).isFile()) {
+				const content = readFileSync(p, "utf8").trim();
+				if (content) return content;
+			}
+		} catch {
+			// fall through: use the raw value as the goal text
+		}
+		return raw;
+	}
 
 	let lastActivityAt = 0;
 	let sessionCtx: ExtensionContext | undefined;
@@ -431,6 +463,11 @@ export default function (pi: ExtensionAPI) {
 			"Script invoked as `script \"message from the agent\"` when the goal is marked complete or impossible.",
 		type: "string",
 	});
+	pi.registerFlag("goal-set", {
+		description:
+			'Initial goal for a fresh session: --goal-set "<goal>" or --goal-set /path/to/file.txt. Sets the goal and starts the agent loop in the TUI (also env PI_GOAL_SET).',
+		type: "string",
+	});
 
 	function buildGoalBlock(goal: GoalEntry): string {
 		return [
@@ -458,6 +495,7 @@ export default function (pi: ExtensionAPI) {
 		// reconstructState(); runs on session_start (reload/resume) and
 		// session_tree (branch/navigate).
 		activeGoal = undefined;
+		branchGoalEntrySeen = false;
 		const entries = ctx.sessionManager.getEntries();
 		const leafId = ctx.sessionManager.getLeafId();
 		if (!leafId) return;
@@ -474,6 +512,7 @@ export default function (pi: ExtensionAPI) {
 		for (const entry of entries) {
 			if (!ancestorIds.has(entry.id)) continue;
 			if (entry.type !== "custom" || entry.customType !== CUSTOM_TYPE) continue;
+			branchGoalEntrySeen = true;
 			const data = entry.data;
 			if (isGoalActive(data)) {
 				activeGoal = data;
@@ -567,6 +606,21 @@ export default function (pi: ExtensionAPI) {
 		lastReminderAt = 0;
 		paused = false;
 		cancelRestart();
+		// --goal-set: seed the initial goal, but only for a session with no goal
+		// history at all. On /reload the seeded goal restores from entries (or a
+		// later /goal clear / /goal change did), so the flag never overrides the
+		// in-session state.
+		const cliGoal = resolveCliGoal();
+		const cliGoalApplied = Boolean(cliGoal && !activeGoal && !branchGoalEntrySeen);
+		if (cliGoalApplied) {
+			activeGoal = {
+				goal: cliGoal as string,
+				id: `sg-${Date.now()}`,
+				setAt: Date.now(),
+				active: true,
+			};
+			void persistGoal(ctx);
+		}
 		// Passively observe terminal input: any keypress during the restart
 		// countdown cancels it and pauses the goal; Escape pauses too. The
 		// listener never consumes input, so typing behaves normally.
@@ -592,7 +646,9 @@ export default function (pi: ExtensionAPI) {
 		touchActivity();
 		startWatchdog();
 		updateStatus();
-		if (activeGoal && ctx.hasUI) {
+		if (cliGoalApplied && ctx.hasUI) {
+			ctx.ui.notify(`Goal set from --goal-set: ${cliGoal}`, "info");
+		} else if (activeGoal && ctx.hasUI) {
 			ctx.ui.notify(`Active goal: ${activeGoal.goal}`, "info");
 		}
 		// A freshly opened/reloaded session with an active goal has no agent_end
@@ -600,9 +656,19 @@ export default function (pi: ExtensionAPI) {
 		// after watchdogIdleMs (default 5min). Close that gap: if the agent
 		// isn't already running (e.g. a mid-run reload), start the standard
 		// countdown — the agent restarts after restartDelayMs unless the user
-		// intervenes (any keypress cancels it).
-		if (activeGoal && !paused && ctx.isIdle() && ctx.hasUI) {
-			startRestartCountdown(ctx);
+		// intervenes (any keypress cancels it). A --goal-set seeding instead
+		// kicks work off immediately (same as /goal <text>).
+		if (activeGoal && !paused && ctx.hasUI) {
+			if (cliGoalApplied) {
+				const kickoff = `Goal set: ${cliGoal}`;
+				if (ctx.isIdle()) {
+					pi.sendUserMessage(kickoff);
+				} else {
+					pi.sendUserMessage(kickoff, { deliverAs: "steer" });
+				}
+			} else if (ctx.isIdle()) {
+				startRestartCountdown(ctx);
+			}
 		}
 	});
 

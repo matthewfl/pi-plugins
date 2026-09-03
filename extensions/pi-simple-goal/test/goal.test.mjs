@@ -9,7 +9,7 @@
 // to resolve @earendil-works/* packages; set PI_CODING_AGENT_DIR to the package
 // root, or have `pi` on PATH, to point it at one.
 
-import { existsSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
@@ -81,8 +81,10 @@ function check(name, cond, extra) {
 	}
 }
 
-// Fresh extension instance per scenario (env must be set before factory runs).
-async function makeWorld({ env = {}, goalActive = true, mode = "tui" } = {}) {
+// Fresh extension instance per scenario (env/flags must be set before the
+// factory runs; `entries` overrides the session-manager entries the branch
+// replays — pass [] to simulate a fresh session with no goal history).
+async function makeWorld({ env = {}, goalActive = true, mode = "tui", flags = {}, entries } = {}) {
 	for (const k of Object.keys(env)) process.env[k] = env[k];
 	const factory = await jiti.import(GOAL_TS, { default: true });
 
@@ -99,7 +101,7 @@ async function makeWorld({ env = {}, goalActive = true, mode = "tui" } = {}) {
 	const pi = {
 		on: (e, fn) => world.handlers.set(e, fn),
 		registerFlag: () => {},
-		getFlag: () => undefined,
+		getFlag: (name) => flags[name],
 		registerTool: (t) => world.tools.set(t.name, t),
 		registerCommand: (name, cmd) => world.handlers.set(`command:${name}`, cmd),
 		appendEntry: async (type, data) => {
@@ -131,7 +133,7 @@ async function makeWorld({ env = {}, goalActive = true, mode = "tui" } = {}) {
 		cwd: "/tmp",
 		isIdle: () => world.idle,
 		sessionManager: {
-			getEntries: () => [goalEntry],
+			getEntries: () => entries ?? [goalEntry],
 			getLeafId: () => "e1",
 		},
 		ui: {
@@ -148,7 +150,16 @@ async function makeWorld({ env = {}, goalActive = true, mode = "tui" } = {}) {
 			},
 		},
 	};
-	world.start = () => world.handlers.get("session_start")({ reason: "startup" }, world.ctx);
+	// Some config is read lazily at session_start (e.g. PI_GOAL_SET), so the
+	// env must be present for the start() call too, then scoped away again.
+	world.start = () => {
+		for (const k of Object.keys(env)) process.env[k] = env[k];
+		try {
+			return world.handlers.get("session_start")({ reason: "startup" }, world.ctx);
+		} finally {
+			for (const k of Object.keys(env)) delete process.env[k];
+		}
+	};
 	world.agentEnd = (stopReason, text = "did some work") =>
 		world.handlers.get("agent_end")(
 			{
@@ -460,6 +471,86 @@ async function makeWorld({ env = {}, goalActive = true, mode = "tui" } = {}) {
 		c.status() === "goal will restart agent in 1s",
 		c.status(),
 	);
+}
+
+// Scenario 15: --goal-set seeds the goal of a fresh session (text or file)
+// and kicks the agent off; skipped when the session already has goal history
+// (restored goal wins; a cleared goal stays cleared across reloads).
+{
+	console.log("scenario 15: --goal-set CLI flag");
+	const a = await makeWorld({ flags: { "goal-set": "cli goal text" }, entries: [] });
+	a.start();
+	check("status after cli goal", a.status() === "goal active", a.status());
+	check(
+		"cli kickoff sent immediately",
+		a.sent.length === 1 && a.sent[0].text === "Goal set: cli goal text" && a.sent[0].opts === undefined,
+		JSON.stringify(a.sent),
+	);
+	check(
+		"cli goal persisted",
+		a.appended.some((e) => e.type === "simple-goal" && e.data?.active === true && e.data?.goal === "cli goal text"),
+		JSON.stringify(a.appended),
+	);
+	check("no countdown after cli kickoff", !/will restart/.test(a.status() ?? ""), a.status());
+
+	// File form: a path to an existing file -> file contents become the goal.
+	const goalFile = `/tmp/cli-goal-test-${process.pid}.txt`;
+	writeFileSync(goalFile, "  file goal text\n\n");
+	const b = await makeWorld({ flags: { "goal-set": goalFile }, entries: [] });
+	b.start();
+	check(
+		"file goal kickoff (trimmed contents)",
+		b.sent.length === 1 && b.sent[0].text === "Goal set: file goal text",
+		JSON.stringify(b.sent),
+	);
+	rmSync(goalFile, { force: true });
+
+	// Env form works too, with the flag taking precedence.
+	const c = await makeWorld({
+		env: { PI_GOAL_SET: "env goal" },
+		flags: { "goal-set": "flag goal" },
+		entries: [],
+	});
+	c.start();
+	check(
+		"flag beats env",
+		c.sent.length === 1 && c.sent[0].text === "Goal set: flag goal",
+		JSON.stringify(c.sent),
+	);
+	const d = await makeWorld({ env: { PI_GOAL_SET: "env goal" }, entries: [] });
+	d.start();
+	check(
+		"env goal kickoff",
+		d.sent.length === 1 && d.sent[0].text === "Goal set: env goal",
+		JSON.stringify(d.sent),
+	);
+
+	// Print mode (no UI): goal is set and persisted, but nothing is kicked off
+	// and no countdown runs (the print prompt drives the run).
+	const e = await makeWorld({ flags: { "goal-set": "print cli goal" }, entries: [], mode: "print" });
+	e.ctx.hasUI = false;
+	e.start();
+	check("print: no kickoff, no countdown", e.sent.length === 0 && e.status() === undefined, `${JSON.stringify(e.sent)} ${e.status()}`);
+	check(
+		"print: goal persisted",
+		e.appended.some((x) => x.data?.active === true && x.data?.goal === "print cli goal"),
+		JSON.stringify(e.appended),
+	);
+
+	// Guard 1: a restored goal wins over the flag (no kickoff; normal startup
+	// countdown instead).
+	const f = await makeWorld({ flags: { "goal-set": "cli shadow goal" }, goalActive: true });
+	f.start();
+	check("restored goal wins over flag", f.sent.length === 0, JSON.stringify(f.sent));
+	check("restored goal shows startup countdown", /will restart/.test(f.status() ?? ""), f.status());
+	check("flag goal not persisted over restore", !f.appended.some((x) => x.data?.active === true), JSON.stringify(f.appended));
+
+	// Guard 2: a cleared goal stays cleared even with the flag set (the
+	// cleared entry counts as history), so /goal clear survives /reload.
+	const g = await makeWorld({ flags: { "goal-set": "cli ghost goal" }, goalActive: false });
+	g.start();
+	check("cleared goal not resurrected", g.sent.length === 0 && g.status() === undefined, `${JSON.stringify(g.sent)} ${g.status()}`);
+	check("no cli goal persisted over cleared entry", !g.appended.some((x) => x.data?.active === true), JSON.stringify(g.appended));
 }
 
 if (failures) {

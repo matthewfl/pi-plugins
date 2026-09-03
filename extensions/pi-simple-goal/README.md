@@ -37,6 +37,15 @@ Other commands:
 /goal clear
 ```
 
+You can also seed the initial goal straight from the command line with `--goal-set` (or the `PI_GOAL_SET` environment variable). The value is either the goal text itself or a path to a file whose contents become the goal (`~` is expanded; the file is trimmed):
+
+```sh
+pi --goal-set "Add pagination to the users API and verify it with tests"
+pi --goal-set ./tasks/add-pagination.txt
+```
+
+On a fresh session this sets and persists the goal and immediately kicks off the agent loop in the TUI (in print mode it only sets the goal). It applies only while the session has no goal history at all, so an in-session `/goal clear` or `/goal <other>` is never overridden by the flag on reload.
+
 While a goal is active, the extension:
 
 - injects the goal and progress instructions into the system prompt;
@@ -61,6 +70,7 @@ Each option can be set via a CLI flag, an environment variable, or the `simpleGo
 | `--goal-watchdog-tool-ms` | `PI_GOAL_WATCHDOG_TOOL_MS` | `watchdogToolMs` | `1800000` | Nudge the agent after a tool runs this long. |
 | `--goal-watchdog-tick-ms` | `PI_GOAL_WATCHDOG_TICK_MS` | `watchdogTickMs` | `30000` | Set how frequently the watchdog checks. |
 | `--goal-notify-script` | `PI_GOAL_NOTIFY_SCRIPT` | `notifyScript` | - | Script invoked as `script "message from the agent"` when the goal is completed or marked impossible. |
+| `--goal-set` | `PI_GOAL_SET` | - | - | Initial goal for a fresh session (inline text, or path to a file whose contents are used). Sets the goal and starts the agent loop in the TUI. Ignored once the session has any goal history. |
 
 Set a watchdog timeout to `0` to disable that check. For example:
 
