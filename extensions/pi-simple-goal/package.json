@@ -3,6 +3,9 @@
 	"version": "0.0.1",
 	"description": "Keep Pi agents working toward a persistent goal with context injection, recovery prompts, and watchdog timers.",
 	"type": "module",
+	"scripts": {
+		"test": "node test/goal.test.mjs"
+	},
 	"license": "MIT",
 	"author": "matthewfl",
 	"homepage": "https://github.com/matthewfl/pi-plugins/tree/master/extensions/pi-simple-goal",
