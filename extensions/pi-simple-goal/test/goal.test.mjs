@@ -59,14 +59,23 @@ const require = createRequire(path.join(PI_PKG, "index.js"));
 const { createJiti } = require("jiti");
 
 const aliases = {
-	"@earendil-works/pi-coding-agent": path.join(PI_PKG, "dist/index.js"),
+	// Tiny shim: goal.ts only imports { defineTool, getAgentDir } at runtime
+	// from pi-coding-agent (the rest is type-only). The real dist/index.js
+	// statically pulls in the interactive-mode + experimental chains, which
+	// breaks whenever pi's packaging changes.
+	"@earendil-works/pi-coding-agent": path.join(EXT_DIR, "test", "sdk-shim.cjs"),
 	"@earendil-works/pi-agent-core": pkgPath("@earendil-works/pi-agent-core/dist/index.js"),
+	// Subpath entries the SDK chain imports internally (jiti prefix-append
+	// would turn ".../dist/index.js/node" into a nonexistent path).
+	"@earendil-works/pi-agent-core/node": pkgPath("@earendil-works/pi-agent-core/dist/node.js"),
 	"@earendil-works/pi-tui": pkgPath("@earendil-works/pi-tui/dist/index.js"),
 	"@earendil-works/pi-ai/providers/all": pkgPath("@earendil-works/pi-ai/dist/providers/all.js"),
 	"@earendil-works/pi-ai/compat": pkgPath("@earendil-works/pi-ai/dist/compat.js"),
 	"@earendil-works/pi-ai/oauth": pkgPath("@earendil-works/pi-ai/dist/oauth.js"),
 	"@earendil-works/pi-ai": pkgPath("@earendil-works/pi-ai/dist/compat.js"),
 	typebox: require.resolve("typebox"),
+	"typebox/compile": require.resolve("typebox/compile"),
+	"typebox/value": require.resolve("typebox/value"),
 };
 
 const jiti = createJiti(import.meta.url, { moduleCache: false, alias: aliases });
@@ -551,6 +560,53 @@ async function makeWorld({ env = {}, goalActive = true, mode = "tui", flags = {}
 	g.start();
 	check("cleared goal not resurrected", g.sent.length === 0 && g.status() === undefined, `${JSON.stringify(g.sent)} ${g.status()}`);
 	check("no cli goal persisted over cleared entry", !g.appended.some((x) => x.data?.active === true), JSON.stringify(g.appended));
+}
+
+// Scenario 16: steering / typing while the agent runs keeps the goal active,
+// and ANY observed agent-loop activity resumes a paused goal. The only pause
+// triggers are Escape and typing during the restart countdown.
+{
+	console.log("scenario 16: steering and agent-loop activity never falsely pause");
+	const w = await makeWorld({ env: { PI_GOAL_RESTART_DELAY_MS: "60000" } });
+	w.start();
+	await w.handlers.get("agent_start")({}, w.ctx); // a run is in flight
+
+	// Typing freely while running: no pause, no countdown interference.
+	w.inputHandler("h");
+	w.inputHandler("i");
+	check("typing while running does not pause", w.status() === "goal active", w.status());
+	// A steering message submission mid-run: also no pause.
+	await w.handlers.get("input")({ text: "steer here", source: "interactive" }, w.ctx);
+	check("steering submission does not pause", w.status() === "goal active", w.status());
+
+	// If the goal somehow got paused mid-run, agent-loop activity heals it.
+	w.inputHandler("\x1b"); // Escape -> intentional pause
+	check("escape pauses mid-run", w.status() === "goal paused (send a message to continue)", w.status());
+	await w.handlers.get("message_update")({}, w.ctx); // abort teardown activity
+	check("escape-settle window blocks activity resume", w.status() === "goal paused (send a message to continue)", w.status());
+	await w.handlers.get("agent_end")(
+		{ messages: [{ role: "assistant", stopReason: "aborted", content: [{ type: "text", text: "" }] }] },
+		w.ctx,
+	);
+	check("abort correlated with escape stays paused", w.status() === "goal paused (send a message to continue)", w.status());
+
+	// A new run starting resumes the pause (any reason: user message, retry).
+	await w.handlers.get("agent_start")({}, w.ctx);
+	check("agent start resumes paused goal", w.status() === "goal active", w.status());
+
+	// Same again but resumed by mid-run activity after the escape window:
+	w.inputHandler("\x1b");
+	check("escape pauses again", w.status() === "goal paused (send a message to continue)", w.status());
+	await sleep(5100); // beyond the 5s escape-settle window (abort never came)
+	await w.handlers.get("turn_end")({}, w.ctx);
+	check("agent-loop activity resumes after settle window", w.status() === "goal active", w.status());
+
+	// Activity without a run in flight does NOT resume a genuine pause.
+	w.agentEnd("stop"); // run finished -> countdown
+	w.inputHandler("x"); // typing during countdown -> pause
+	check("paused during countdown typing", w.status() === "goal paused (send a message to continue)", w.status());
+	await w.handlers.get("message_update")({}, w.ctx); // stray event, no run
+	check("no-run activity does not resume", w.status() === "goal paused (send a message to continue)", w.status());
 }
 
 if (failures) {

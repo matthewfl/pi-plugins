@@ -181,46 +181,63 @@ export default function (pi: ExtensionAPI) {
 	// from "goal existed and was cleared/changed" (user's decision wins).
 	let branchGoalEntrySeen = false;
 
-	const settings = loadSettings();
+	// Resolved lazily (memoized on first use): pi requires a flag to be
+	// registered before getFlag() sees it, and applies argv values only AFTER
+	// extensions load, so factory-time reads never saw CLI-passed values
+	// (env vars and settings.json always worked). First resolution happens on
+	// session_start at the latest, when everything is in place.
+	let resolvedConfig:
+		| {
+				idleMs: number;
+				toolMs: number;
+				tickMs: number;
+				restartDelayMs: number;
+				notifyScript: string | undefined;
+		  }
+		| undefined;
+	function cfg() {
+		if (!resolvedConfig) {
+			const settings = loadSettings();
+			resolvedConfig = {
+				idleMs: configNum(
+					pi,
+					"goal-watchdog-idle-ms",
+					"PI_GOAL_WATCHDOG_IDLE_MS",
+					settings.watchdogIdleMs,
+					WATCHDOG_IDLE_DEFAULT_MS,
+				),
+				toolMs: configNum(
+					pi,
+					"goal-watchdog-tool-ms",
+					"PI_GOAL_WATCHDOG_TOOL_MS",
+					settings.watchdogToolMs,
+					WATCHDOG_TOOL_DEFAULT_MS,
+				),
+				tickMs: configNum(
+					pi,
+					"goal-watchdog-tick-ms",
+					"PI_GOAL_WATCHDOG_TICK_MS",
+					settings.watchdogTickMs,
+					WATCHDOG_TICK_DEFAULT_MS,
+				),
+				restartDelayMs: configNum(
+					pi,
+					"goal-restart-delay-ms",
+					"PI_GOAL_RESTART_DELAY_MS",
+					settings.restartDelayMs,
+					RESTART_DELAY_DEFAULT_MS,
+				),
+				notifyScript: configStr(
+					pi,
+					"goal-notify-script",
+					"PI_GOAL_NOTIFY_SCRIPT",
+					settings.notifyScript,
+				),
+			};
+		}
+		return resolvedConfig;
+	}
 
-	// Watchdog config (0 disables that check).
-	const IDLE_MS = configNum(
-		pi,
-		"goal-watchdog-idle-ms",
-		"PI_GOAL_WATCHDOG_IDLE_MS",
-		settings.watchdogIdleMs,
-		WATCHDOG_IDLE_DEFAULT_MS,
-	);
-	const TOOL_MS = configNum(
-		pi,
-		"goal-watchdog-tool-ms",
-		"PI_GOAL_WATCHDOG_TOOL_MS",
-		settings.watchdogToolMs,
-		WATCHDOG_TOOL_DEFAULT_MS,
-	);
-	const TICK_MS = configNum(
-		pi,
-		"goal-watchdog-tick-ms",
-		"PI_GOAL_WATCHDOG_TICK_MS",
-		settings.watchdogTickMs,
-		WATCHDOG_TICK_DEFAULT_MS,
-	);
-	// Restart countdown (0 disables the delay: restart immediately).
-	const RESTART_DELAY_MS = configNum(
-		pi,
-		"goal-restart-delay-ms",
-		"PI_GOAL_RESTART_DELAY_MS",
-		settings.restartDelayMs,
-		RESTART_DELAY_DEFAULT_MS,
-	);
-	// Script invoked as `script "message from the agent"` when the goal is
-	// marked complete or impossible.
-	const NOTIFY_SCRIPT = configStr(
-		pi,
-		"goal-notify-script",
-		"PI_GOAL_NOTIFY_SCRIPT",
-		settings.notifyScript,
-	);
 
 	// --goal-set "<goal>" | --goal-set /path/to/file.txt (env: PI_GOAL_SET):
 	// initial goal seeded into a session that has no goal history yet. Read
@@ -256,6 +273,8 @@ export default function (pi: ExtensionAPI) {
 	let restartTimer: NodeJS.Timeout | undefined;
 	let restartTickTimer: NodeJS.Timeout | undefined;
 	let restartDeadlineAt = 0;
+	// Whether an agent run is currently in flight (agent_start..agent_end).
+	let agentActive = false;
 
 	const touchActivity = () => {
 		lastActivityAt = Date.now();
@@ -319,7 +338,7 @@ export default function (pi: ExtensionAPI) {
 			lastReminderAt <= 0
 				? 0
 				: Math.max(0, lastReminderAt + MIN_REMINDER_INTERVAL_MS - now);
-		const fireIn = Math.max(RESTART_DELAY_MS, gateWait);
+		const fireIn = Math.max(cfg().restartDelayMs, gateWait);
 		if (fireIn <= 0 || !ctx.hasUI) {
 			// No delay configured (or no UI to show/cancel it): keep the original
 			// immediate-continue behavior.
@@ -360,9 +379,26 @@ export default function (pi: ExtensionAPI) {
 		updateStatus();
 	};
 
+	// A paused goal resumes when ANY agent-loop activity is observed while a
+	// run is actually in flight — steering messages, follow-ups, a manual
+	// restart — anything that has the agent working again means the user (or
+	// another mechanism) took over and the pause is moot. Excluded: the short
+	// window after Escape, where the just-triggered abort is still tearing
+	// down and agent_end owns the pause decision.
+	const maybeResumeOnActivity = () => {
+		if (!activeGoal || !paused || !agentActive) return;
+		if (
+			lastEscapeAt > 0 &&
+			Date.now() - lastEscapeAt <= ESCAPE_ABORT_WINDOW_MS
+		) {
+			return;
+		}
+		resumeGoal();
+	};
+
 	const runNotifyScript = (message: string) => {
-		if (!NOTIFY_SCRIPT) return;
-		const script = expandHome(NOTIFY_SCRIPT);
+		const script = cfg().notifyScript;
+		if (!script) return;
 		pi.exec(script, [message], { timeout: 30_000 })
 			.then((res) => {
 				if (res.code !== 0) {
@@ -409,15 +445,17 @@ export default function (pi: ExtensionAPI) {
 
 	const startWatchdog = () => {
 		stopWatchdog();
-		if (IDLE_MS <= 0 && TOOL_MS <= 0) return;
+		const { idleMs, toolMs, tickMs } = cfg();
+		if (idleMs <= 0 && toolMs <= 0) return;
 		watchdogTimer = setInterval(() => {
 			if (!activeGoal || paused) return;
 			if (restartDeadlineAt > 0) return; // restart countdown already pending
 			const now = Date.now();
-			// Long-running tool: agent is blocked on a tool that exceeded TOOL_MS.
-			if (TOOL_MS > 0) {
+			// Long-running tool: agent is blocked on a tool that exceeded the
+			// tool-watchdog timeout.
+			if (toolMs > 0) {
 				for (const [id, start] of inFlightTools) {
-					if (now - start >= TOOL_MS) {
+					if (now - start >= toolMs) {
 						nudgeGoal("stuck-tool");
 						inFlightTools.set(id, now); // reset; won't re-nudge for another TOOL_MS
 						break;
@@ -426,14 +464,14 @@ export default function (pi: ExtensionAPI) {
 			}
 			// Idle: no activity and no tool running for IDLE_MS.
 			if (
-				IDLE_MS > 0 &&
+				idleMs > 0 &&
 				inFlightTools.size === 0 &&
-				now - lastActivityAt >= IDLE_MS &&
+				now - lastActivityAt >= idleMs &&
 				(sessionCtx?.isIdle() ?? true)
 			) {
 				nudgeGoal("idle");
 			}
-		}, TICK_MS);
+		}, tickMs);
 		if (
 			watchdogTimer &&
 			typeof (watchdogTimer as NodeJS.Timeout).unref === "function"
@@ -630,12 +668,14 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.mode === "tui") {
 			unsubscribeInput = ctx.ui.onTerminalInput((data) => {
 				terminalInputActive = true;
+				if (!activeGoal || paused) return undefined;
 				if (isEscapeKey(data)) {
 					lastEscapeAt = Date.now();
-					pauseGoal(); // user stepped in: stop restarting / pause the goal
+					// The user interrupted the agent (or cancelled the countdown):
+					// pause immediately; agent_end's abort correlation backs it up.
+					pauseGoal();
 					return undefined;
 				}
-				if (!activeGoal || paused) return undefined;
 				if (restartDeadlineAt > 0) {
 					pauseGoal(); // typing during the restart window cancels it
 				}
@@ -689,6 +729,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", () => {
 		stopWatchdog();
 		cancelRestart();
+		agentActive = false;
 		inFlightTools.clear();
 		unsubscribeInput?.();
 		unsubscribeInput = undefined;
@@ -697,6 +738,7 @@ export default function (pi: ExtensionAPI) {
 	// The agent (re)starting for any reason auto-resumes a paused goal and
 	// re-arms the watchdogs, and supersedes any pending restart countdown.
 	pi.on("agent_start", (_event, ctx) => {
+		agentActive = true;
 		sessionCtx = ctx;
 		cancelRestart();
 		if (activeGoal) {
@@ -712,8 +754,15 @@ export default function (pi: ExtensionAPI) {
 
 	// Track liveness so the watchdog can detect a stuck/idle agent (the
 	// post-compaction stuck state fires no agent_end we can nudge on).
-	pi.on("message_update", () => touchActivity());
-	pi.on("turn_end", () => touchActivity());
+	// Agent-loop activity also resumes a paused goal (the run goes on).
+	pi.on("message_update", () => {
+		touchActivity();
+		maybeResumeOnActivity();
+	});
+	pi.on("turn_end", () => {
+		touchActivity();
+		maybeResumeOnActivity();
+	});
 	pi.on("input", () => {
 		touchActivity();
 		// A submitted message supersedes a pending restart countdown and
@@ -724,6 +773,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_execution_start", (event: { toolCallId: string }) => {
 		inFlightTools.set(event.toolCallId, Date.now());
 		touchActivity();
+		maybeResumeOnActivity();
 	});
 	pi.on("tool_execution_end", (event: { toolCallId: string }) => {
 		inFlightTools.delete(event.toolCallId);
@@ -784,6 +834,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", (event, ctx) => {
+		agentActive = false;
 		touchActivity();
 		sessionCtx = ctx;
 		if (!activeGoal) return;

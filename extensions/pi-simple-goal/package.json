@@ -1,6 +1,6 @@
 {
 	"name": "@matthewfl/pi-simple-goal",
-	"version": "0.0.2",
+	"version": "0.0.3",
 	"description": "Keep Pi agents working toward a persistent goal with context injection, recovery prompts, and watchdog timers.",
 	"type": "module",
 	"scripts": {
