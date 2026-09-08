@@ -590,6 +590,12 @@ async function suiteA() {
 		const empty = widget.renderTodoWidgetLines({ todos: [], plan: {}, goals: [] }, rtOn, 6, 60, stubTheme);
 		const unarmed = widget.renderTodoWidgetLines(state, rtOff, 6, 60, stubTheme);
 		const offMarker = unescape(unarmed.at(-1)).includes("poke off");
+		// Esc-pause label must be distinct from the sticky /todos poke off state.
+		const rtEscPaused = { armed: false, escPaused: true, gateAttempts: 0, gateMaxAttempts: 5 };
+		const escPausedLine = widget.renderTodoWidgetLines(state, rtEscPaused, 6, 60, stubTheme);
+		const escPausedMarker =
+			unescape(escPausedLine.at(-1)).includes("poke paused") &&
+			!unescape(escPausedLine.at(-1)).includes("poke off");
 		// value-rank: shown item lines are exactly a(in_progress), then pending
 		// in declaration order; settled items are pushed into the overflow.
 		const shownIds = lines.slice(1, -1).map((l) => (unescape(l).match(/#(\w+)/) || [])[1]);
@@ -682,10 +688,10 @@ async function suiteA() {
 			markRow("g-warn")?.includes("🟡") && markRow("g-ok")?.includes("✔") &&
 			markRow("g-act")?.includes("🚧") && markRow("g-wait")?.includes("🔲") &&
 			markRow("g-nogoal")?.includes("–");
-		if (firstIsHeader && bottomStatus && inProgressOnTop && capped && openBreakdown && withinWidth && armedMarker && ranked && lateLeads && indented && empty.length === 0 && !unescape(unarmed.at(-1)).includes("auto-poke") && offMarker && confTails && gateShown && doneShown && intentShown && multiClean && icons && finger && tableHeader && activeFirst && verifyCells && builderCells && tableFooter && tableDropped && aligned && allAligned) {
+		if (firstIsHeader && bottomStatus && inProgressOnTop && capped && openBreakdown && withinWidth && armedMarker && ranked && lateLeads && indented && empty.length === 0 && !unescape(unarmed.at(-1)).includes("auto-poke") && offMarker && escPausedMarker && confTails && gateShown && doneShown && intentShown && multiClean && icons && finger && tableHeader && activeFirst && verifyCells && builderCells && tableFooter && tableDropped && aligned && allAligned) {
 			ok("T13 widget", "intention header + bottom status + table (Todo Goal) correct");
 		} else {
-			bad("T13 widget", JSON.stringify({ firstIsHeader, bottomStatus, inProgressOnTop, capped, withinWidth, offMarker, confTails, gateShown, doneShown, intentShown, multiClean, icons, finger, tableHeader, activeFirst, verifyCells, builderCells, tableFooter, tableDropped, aligned, allAligned, intentLines, mixedTbl }, null, 1));
+			bad("T13 widget", JSON.stringify({ firstIsHeader, bottomStatus, inProgressOnTop, capped, withinWidth, offMarker, escPausedMarker, confTails, gateShown, doneShown, intentShown, multiClean, icons, finger, tableHeader, activeFirst, verifyCells, builderCells, tableFooter, tableDropped, aligned, allAligned, intentLines, mixedTbl }, null, 1));
 		}
 	});
 }
@@ -699,6 +705,7 @@ function makeMockStreamSimple(calls, script) {
 	return function streamSimple(model, context, options) {
 		callIndex += 1;
 		calls.push({ index: callIndex, context });
+		if (typeof script.onRequest === "function") script.onRequest(context);
 		const step = callIndex;
 		const scriptCall = script.call;
 		const scriptText = script.text;
@@ -717,8 +724,22 @@ function makeMockStreamSimple(calls, script) {
 				stopReason: "pending",
 				timestamp: Date.now(),
 			};
-			try {
+		try {
 				stream.push({ type: "start", partial: output });
+				if (script.gateAt === step) {
+					// Hold the stream open so the test can abort mid-flight; honor the
+					// abort signal exactly like pi's own providers do (openai-completions.js).
+					const signal = options?.signal;
+					if (signal?.aborted) throw new Error("Request was aborted");
+					await new Promise((resolve, reject) => {
+						const onAbort = () => reject(new Error("Request was aborted"));
+						signal?.addEventListener("abort", onAbort, { once: true });
+						(script.gatePromise || Promise.resolve()).then(
+							() => { signal?.removeEventListener("abort", onAbort); resolve(); },
+							reject,
+						);
+					});
+				}
 				const toolCall = scriptCall(step);
 				if (toolCall) {
 					output.content.push(toolCall);
@@ -737,9 +758,12 @@ function makeMockStreamSimple(calls, script) {
 				stream.push({ type: "done", reason: output.stopReason, message: output });
 				stream.end();
 			} catch (err) {
-				output.stopReason = "error";
+				output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+				// Simulate provider stacks (pi-robust-provider observed live) that
+				// finalize an abort as a generic error naming the abort.
+				if (script.misclassifiedAbortAt === step) output.stopReason = "error";
 				output.errorMessage = err.message;
-				stream.push({ type: "error", reason: "error", error: output });
+				stream.push({ type: "error", reason: output.stopReason, error: output });
 				stream.end();
 			}
 		})();
@@ -909,6 +933,14 @@ const SCRIPT_B3 = {
 
 async function runScenario(name, script, assertions) {
 	const calls = [];
+	if (script.abortAtCall) {
+		// Gate the abortAtCall'th provider call mid-stream so the test can abort
+		// the run deterministically while it is in flight.
+		script.gateAt = script.abortAtCall;
+		script.gatePromise = new Promise((resolve) => {
+			script.releaseGate = resolve;
+		});
+	}
 	const mockFactory = {
 		name: "mock-provider",
 		factory: (api) => {
@@ -924,18 +956,49 @@ async function runScenario(name, script, assertions) {
 	};
 	await run(name, async ({ session }) => {
 		await session.setModel(MOCK_MODEL);
+		let abortTimerFired = false;
+		if (script.abortAtCall) {
+			// prompt() resolves only after every queued follow-up run finishes, so
+			// the poll loop below can never reach the gated call. Simulate Esc from
+			// a timer: abort once the gated provider call has actually started.
+			const startedAt = Date.now();
+			const abortWhenStarted = () => {
+				if (calls.length >= script.abortAtCall) {
+					abortTimerFired = true;
+					if (script.compactInsteadOfAbort) session.compact();
+					else session.abort();
+					// Safety net: if the abort somehow never reaches the mock, release
+					// the gate so the scenario fails with diagnostics instead of hanging.
+					setTimeout(() => { if (script.releaseGate) script.releaseGate(); }, 3000);
+				} else if (Date.now() - startedAt < 12_000) {
+					setTimeout(abortWhenStarted, 100);
+				}
+			};
+			setTimeout(abortWhenStarted, 300);
+		}
 		await session.prompt("begin");
 
 		const deadline = Date.now() + 20_000;
 		let prompted = false;
+		let aborted = false;
+		let resumed = false;
 		while (Date.now() < deadline) {
 			if (!prompted && script.promptAfter && calls.length >= script.promptAfter) {
 				prompted = true;
 				void session.prompt(script.promptText ?? "continue");
 			}
+			if (!aborted && script.abortAtCall && calls.length >= script.abortAtCall) {
+				aborted = true; // bookkeeping only; the timer above fired the Esc
+				if (!abortTimerFired) session.abort();
+			}
+			if (aborted && !resumed) {
+				resumed = true;
+				await sleep(1500); // let the abort settle (disarm + quiet) run first
+				void session.prompt(script.resumeText ?? "resume after the interrupt");
+			}
 			if (calls.length >= script.calls) {
 				await sleep(800);
-				if (calls.length === script.calls) break; // no further provider activity
+				if (calls.length >= script.calls && calls.length <= (script.callsMax ?? script.calls)) break; // done
 			}
 			await sleep(100);
 		}
@@ -943,8 +1006,9 @@ async function runScenario(name, script, assertions) {
 		const customs = entries
 			.filter((e) => e.type === "custom_message" && e.customType === "pi-jtodo/followup")
 			.map((e) => (typeof e.content === "string" ? e.content : ""));
-		if (calls.length !== script.calls) {
-			bad(`${name} flow`, `expected ${script.calls} provider calls, got ${calls.length}; customs=${JSON.stringify(customs.map((t) => t.slice(0, 60)))}`);
+		const inRange = calls.length >= script.calls && calls.length <= (script.callsMax ?? script.calls);
+		if (!inRange) {
+			bad(`${name} flow`, `expected ${script.calls}${script.callsMax ? `..${script.callsMax}` : ""} provider calls, got ${calls.length}; customs=${JSON.stringify(customs.map((t) => t.slice(0, 60)))}`);
 			return;
 		}
 
@@ -952,7 +1016,7 @@ async function runScenario(name, script, assertions) {
 			(e) => e.type === "message" && e.message?.role === "toolResult" && e.message?.toolName === "todo",
 		);
 		const lastDetails = todoResults.at(-1)?.message?.details;
-		await assertions({ calls, customs, lastDetails });
+		await assertions({ calls, customs, lastDetails, entries });
 	}, { extensionFactories: [mockFactory] });
 }
 
@@ -1020,6 +1084,187 @@ async function suiteB() {
 			&& (lastDetails?.todos ?? []).length === 2;
 		if (done) ok("B3 final state", "both waves completed");
 		else bad("B3 final state", JSON.stringify(lastDetails?.todos));
+	});
+
+	// B4: Esc (session.abort) on the poke-driven run must disarm and inject
+	// NOTHING afterwards, even though open todos remain. Flow: run A writes an
+	// open todo and ends (settle #1 pokes), the poke-driven run B is aborted
+	// mid-stream (the user's exact complaint), and both the abort settle and
+	// the resumed run's settle stay quiet via the agent_end abort flag.
+	// B4: an abort with NO raw Escape behind it is machinery (ctx.abort(),
+	// extension-initiated, transport). Under the pi-simple-goal Escape model
+	// the poke cycle stays armed: the aborted settle is quiet, but a resumed
+	// run that still leaves todos open pokes normally. The real user-Esc pause
+	// (raw \x1b keypress) is TUI-only and verified live, not in the SDK harness.
+	const SCRIPT_B4 = {
+		call(step) {
+			if (step === 1) {
+				return {
+					type: "toolCall", id: "call-open", name: "todo",
+					arguments: {
+						todos: [{ content: "machinery abort guard", status: "in_progress", priority: "high", id: "e1", group: "esc", confidence: 96 }],
+						plan: { user_intention: "machinery abort e2e", understands_user_intent: 97 },
+						goals: [{ group: "esc", closed_feedback_loop: 97, feedback_loop: "abort keeps armed" }],
+					},
+				};
+			}
+			if (step === 5) {
+				return {
+					type: "toolCall", id: "call-done", name: "todo",
+					arguments: {
+						todos: [{ content: "machinery abort guard", status: "completed", priority: "high", id: "e1", group: "esc", confidence: 96, completion_confidence: 96 }],
+						goals: [{ group: "esc", closed_feedback_loop: 97, feedback_loop: "abort keeps armed", end_to_end_ownership: 96 }],
+					},
+				};
+			}
+			return null;
+		},
+		text(step) {
+			if (step === 2) return "Todos written.";
+			if (step === 3) return "Poked: working on it, mid-stream.";
+			if (step === 4) return "Resumed after the interrupt, still working.";
+			return "All done now.";
+		},
+		abortAtCall: 3, // abort run B, the poke-driven continuation
+		resumeText: "resume after the interrupt",
+		calls: 6,
+	};
+	await runScenario("B4 machinery abort keeps the poke cycle armed", SCRIPT_B4, async ({ customs, entries }) => {
+		const pokes = customs.filter((t) => t.includes("You have 1 incomplete todo."));
+		if (pokes.length === 2) ok("B4 poke before and after abort", "poke #1 at the write settle, poke #2 after the resumed run — cycle stayed armed");
+		else bad("B4 poke before and after abort", `pokes=${pokes.length} customs=${JSON.stringify(customs.map((t) => t.slice(0, 60)))}`);
+		if (customs.length === 2) ok("B4 aborted settle quiet", "the abort settle itself injected nothing");
+		else bad("B4 aborted settle quiet", `customs=${JSON.stringify(customs.map((t) => t.slice(0, 60)))}`);
+		const stopReasons = entries
+			.filter((e) => e.type === "message" && e.message?.role === "assistant")
+			.map((e) => e.message.stopReason);
+		if (stopReasons.includes("aborted")) ok("B4 harness abort recorded", `assistant stopReasons=${JSON.stringify(stopReasons)}`);
+		else bad("B4 harness abort recorded", `no aborted stopReason; stopReasons=${JSON.stringify(stopReasons)}`);
+	});
+
+	// B5: pi-robust-provider observed live finalizing an Esc abort as a plain
+	// error whose text names the abort ("This operation was aborted"). The
+	// error-text fallback must classify it as a user interrupt and stay quiet.
+	// B5: pi-robust-provider observed live finalizing an Esc abort as a plain
+	// error whose text names the abort ("This operation was aborted"). Under
+	// the raw-Escape classification model a stopReason mislabel changes
+	// NOTHING: with no Escape keypress observed this is machinery, the settle is
+	// quiet, and the cycle stays armed. The real-Esc correlation is live-only.
+	const SCRIPT_B5 = {
+		call(step) {
+			if (step === 1) {
+				return {
+					type: "toolCall", id: "call-open", name: "todo",
+					arguments: {
+						todos: [{ content: "misclassified abort guard", status: "in_progress", priority: "high", id: "m1", group: "esc", confidence: 96 }],
+						plan: { user_intention: "misclassified abort e2e", understands_user_intent: 97 },
+						goals: [{ group: "esc", closed_feedback_loop: 97, feedback_loop: "error-naming-abort keeps armed" }],
+					},
+				};
+			}
+			if (step === 5) {
+				return {
+					type: "toolCall", id: "call-done", name: "todo",
+					arguments: {
+						todos: [{ content: "misclassified abort guard", status: "completed", priority: "high", id: "m1", group: "esc", confidence: 96, completion_confidence: 96 }],
+						goals: [{ group: "esc", closed_feedback_loop: 97, feedback_loop: "error-naming-abort keeps armed", end_to_end_ownership: 96 }],
+					},
+				};
+			}
+			return null;
+		},
+		text(step) {
+			if (step === 2) return "Todos written.";
+			if (step === 3) return "Poked: working, mid-stream.";
+			if (step === 4) return "Resumed after the interrupt, still working.";
+			return "All done now.";
+		},
+		abortAtCall: 3,
+		misclassifiedAbortAt: 3, // the abort finalizes as stopReason "error" naming the abort
+		resumeText: "resume after the interrupt",
+		calls: 6,
+	};
+	await runScenario("B5 error-naming-abort (robust-provider) is machinery", SCRIPT_B5, async ({ customs, entries }) => {
+		const pokes = customs.filter((t) => t.includes("You have 1 incomplete todo."));
+		if (pokes.length === 2) ok("B5 poke before and after abort", "misclassified abort did not suppress the cycle");
+		else bad("B5 poke before and after abort", `pokes=${pokes.length} customs=${JSON.stringify(customs.map((t) => t.slice(0, 60)))}`);
+		if (customs.length === 2) ok("B5 aborted settle quiet", "the error-naming-abort settle injected nothing");
+		else bad("B5 aborted settle quiet", `customs=${JSON.stringify(customs.map((t) => t.slice(0, 60)))}`);
+		const interrupted = entries
+			.filter((e) => e.type === "message" && e.message?.role === "assistant")
+			.find((e) => /abort/i.test(e.message?.errorMessage ?? ""));
+		if (interrupted?.message?.stopReason === "error") ok("B5 interrupt finalized as error", "errorMessage names the abort, stopReason is error");
+		else bad("B5 interrupt finalized as error", `stopReason=${interrupted?.message?.stopReason} err=${interrupted?.message?.errorMessage}`);
+	});
+
+	// B6: compaction aborts the in-flight run but guarantees a continuation —
+	// a system interrupt. Its settle must stay quiet WITHOUT disarming and
+	// WITHOUT the sticky Esc off, so the resumed run's settle pokes normally.
+	let b6DoneSent = false;
+	let b6PokesSeen = 0;
+	const SCRIPT_B6 = {
+		onRequest(context) {
+			// Count auto-poke messages already in the request history; robust
+			// to compaction consuming 1 or 2 provider calls. User-role content may
+			// be a string or a block array (same extraction as contextUserTexts).
+			const texts = (context?.messages ?? [])
+				.filter((m) => m?.role === "user")
+				.map((m) =>
+					typeof m?.content === "string"
+						? m.content
+						: (m?.content ?? []).map((c) => c?.text ?? "").join(""),
+				);
+			b6PokesSeen = texts.filter((t) => t.includes("You have 1 incomplete todo.")).length;
+		},
+		call(step) {
+			if (step === 1) {
+				return {
+					type: "toolCall", id: "call-open", name: "todo",
+					arguments: {
+						todos: [{ content: "compaction window guard", status: "in_progress", priority: "high", id: "c1", group: "esc", confidence: 96 }],
+						plan: { user_intention: "compaction window e2e", understands_user_intent: 97 },
+						goals: [{ group: "esc", closed_feedback_loop: 97, feedback_loop: "armed survives compaction" }],
+					},
+				};
+			}
+			// Only the run driven by poke #2 completes the todo, so poke #2
+			// provably fired (the resumed run before it must leave it open).
+			if (step >= 5 && b6PokesSeen >= 2 && !b6DoneSent) {
+				b6DoneSent = true;
+				return {
+					type: "toolCall", id: "call-done", name: "todo",
+					arguments: {
+						todos: [{ content: "compaction window guard", status: "completed", priority: "high", id: "c1", group: "esc", confidence: 96, completion_confidence: 96 }],
+						goals: [{ group: "esc", closed_feedback_loop: 97, feedback_loop: "armed survives compaction", end_to_end_ownership: 96 }],
+					},
+				};
+			}
+			return null;
+		},
+		text(step) {
+			if (step === 2) return "Todos written. " + "Detailed work log entries accumulate here. ".repeat(2600);
+			if (step === 3) return "Poked: working, mid-stream.";
+			return "Continuing after compaction.";
+		},
+		abortAtCall: 3,
+		compactInsteadOfAbort: true, // session.compact() aborts the gated run (system interrupt)
+		promptAfter: 4, // after the compaction summarization call, resume the agent
+		promptText: "resume the work",
+		calls: 7,
+		callsMax: 9, // compaction may consume 1 or 2 provider calls
+	};
+	await runScenario("B6 compaction abort keeps the poke cycle armed", SCRIPT_B6, async ({ customs, entries }) => {
+		const pokes = customs.filter((t) => t.includes("You have 1 incomplete todo."));
+		if (pokes.length === 2) ok("B6 armed preserved", "poke #1 pre-abort, poke #2 after the resumed run — no sticky-off");
+		else bad("B6 armed preserved", `pokes=${pokes.length} customs=${JSON.stringify(customs.map((t) => t.slice(0, 60)))}`);
+		const noisy = customs.filter((t) => t.includes("rose too sharply") || t.includes("not high enough") || t.includes("todo quality review"));
+		if (noisy.length === 0) ok("B6 no spurious gates", "clean scores produced no challenges/digest");
+		else bad("B6 no spurious gates", JSON.stringify(noisy));
+		const stopReasons = entries
+			.filter((e) => e.type === "message" && e.message?.role === "assistant")
+			.map((e) => e.message.stopReason);
+		if (stopReasons.includes("aborted")) ok("B6 compaction abort recorded", `stopReasons=${JSON.stringify(stopReasons)}`);
+		else bad("B6 compaction abort recorded", `no aborted stopReason; stopReasons=${JSON.stringify(stopReasons)}`);
 	});
 }
 

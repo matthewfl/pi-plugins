@@ -1,6 +1,6 @@
 {
 	"name": "@matthewfl/pi-jtodo",
-	"version": "0.0.1",
+	"version": "0.0.2",
 	"description": "Quality-gated todo tool for Pi: confidence scores with tool-owned histories, plan and per-goal assessments, write-time ownership rejection, turn-end completion/spike gates, deferred quality digests, auto-poke continuation, starvation watchdog, and a live todo strip.",
 	"type": "module",
 	"scripts": {

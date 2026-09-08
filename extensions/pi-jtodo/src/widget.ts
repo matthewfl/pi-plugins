@@ -30,6 +30,8 @@ export interface TodoWidgetComponent {
 /** Machine state the header tail should surface. */
 export interface WidgetRuntime {
 	armed: boolean;
+	/** An Escape-paused cycle: suppressed until the user re-engages */
+	escPaused?: boolean;
 	gateAttempts: number;
 	gateMaxAttempts: number;
 	/** Ids of the todos that caused the most recent poke/gate challenge */
@@ -105,7 +107,11 @@ function buildLeftColumn(
 	// user has been seeing.
 	let status: string;
 	if (!allSettled) {
-		status = runtime.armed ? "· auto-poke" : "· poke off";
+		status = runtime.armed
+			? "· auto-poke"
+			: runtime.escPaused
+				? "· poke paused"
+				: "· poke off";
 	} else if (summary.needs_validation) {
 		status =
 			runtime.gateAttempts > 0

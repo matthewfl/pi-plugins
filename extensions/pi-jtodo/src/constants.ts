@@ -26,6 +26,12 @@ export const TODO_COMPLETION_GATE_MAX_ATTEMPTS = 5;
 /** Upper bound on retained turn-scoped observations; oldest dropped first. */
 export const MAX_GATE_OBSERVATIONS = 256;
 
+// Window in which a raw Escape keypress is considered the cause of an aborted
+// run (user stopped it on purpose). Outside this window an abort is machinery
+// (compaction, ctx.abort(), transport) and the poke cycle stays armed.
+// Same value and rationale as pi-simple-goal's ESCAPE_ABORT_WINDOW_MS.
+export const ESCAPE_ABORT_WINDOW_MS = 5_000;
+
 /** customType for all synthetic gate follow-ups (custom session messages). */
 export const FOLLOWUP_CUSTOM_TYPE = "pi-jtodo/followup";
 

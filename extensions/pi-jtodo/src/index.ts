@@ -32,6 +32,7 @@ import type {
 import { Text } from "@earendil-works/pi-tui";
 import {
 	CYCLE_CUSTOM_TYPE,
+	ESCAPE_ABORT_WINDOW_MS,
 	FOLLOWUP_CUSTOM_TYPE,
 	NOTICE_COMPLETION_CHALLENGED,
 	NOTICE_DIGEST_QUEUED,
@@ -150,6 +151,22 @@ export default function (pi: ExtensionAPI) {
 	// pi-specific: once the user has explicitly silenced the poke (poke off,
 	// or Esc-interrupting a run), new open work must NOT re-arm it.
 	let pokeExplicitlyOff = false;
+	// Whether the most recent completed agent run was Esc-aborted, recorded
+	// from the agent_end event itself (the run's own messages). Entry-scanning
+	// heuristics misclassify aborts when a queued user message (compaction
+	// resume, steer) lands after the aborted assistant message; an
+	// Esc-aborted run must never restart the agent via a poke.
+	let lastRunAborted = false;
+	// Goal-plugin-style Escape correlation (pi-simple-goal): a raw Escape
+	// keypress observed via terminal input marks the NEXT aborted run as the
+	// user's stop. Aborts with no recent Escape behind them are machinery
+	// (compaction, ctx.abort(), transport) and keep the poke cycle armed.
+	let lastEscapeAt = 0;
+	// Set when an Escape-classified abort pauses the poke. NOT sticky: the
+	// next agent run (user re-engaged, or machinery resumed) lifts it and
+	// re-arms, per the user's "stop the poke for the next while" rule.
+	let escPokePaused = false;
+	let unsubscribeTerminalInput: (() => void) | undefined;
 	// Whether poking is allowed at all. session_start (when emitted — the
 	// SDK harness and some embedders never emit it) re-derives this from
 	// its ctx.hasUI; elsewhere starts optimistic, matching the module-level
@@ -237,6 +254,7 @@ export default function (pi: ExtensionAPI) {
 						() => state,
 						() => ({
 							armed: autoPokeArmed,
+							escPaused: escPokePaused,
 							gateAttempts: cycle.gateAttempts,
 							gateMaxAttempts: config.completionGateMaxAttempts,
 							pokeTargets: lastPokeTargets,
@@ -432,16 +450,16 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** True when the last assistant message on this branch was aborted (Esc). */
-	function wasLastRunAborted(ctx: ExtensionContext): boolean {
-		const entries = ctx.sessionManager.getEntries();
-		for (let i = entries.length - 1; i >= 0; i--) {
-			const entry = entries[i];
-			if (entry.type !== "message") continue;
-			const message = (entry as { message?: { role?: string; stopReason?: string } }).message;
-			if (message?.role === "assistant") return message.stopReason === "aborted";
-			if (message?.role === "user") return false;
-		}
-		return false;
+	function wasLastRunAborted(): boolean {
+		return lastRunAborted;
+	}
+
+	// Some provider stacks (pi-robust-provider observed live: errorMessage
+	// "This operation was aborted") finalize an Esc-aborted request as a
+	// generic error whose text still names the abort. Those are user
+	// interrupts, not provider failures, and must never restart the agent.
+	function looksInterrupted(stopReason: string | undefined, errorMessage: string | undefined): boolean {
+		return stopReason === "error" && typeof errorMessage === "string" && /abort/i.test(errorMessage);
 	}
 
 	function countAssistantTurnsSinceUser(ctx: ExtensionContext): number {
@@ -584,7 +602,7 @@ export default function (pi: ExtensionAPI) {
 		isArmed: () => autoPokeArmed,
 		isIdle: () => watchdogCtx?.isIdle() ?? false,
 		incompleteCount: () => incompleteTodos().length,
-		wasAborted: () => (watchdogCtx ? wasLastRunAborted(watchdogCtx) : false),
+		wasAborted: () => lastRunAborted,
 		idleMs: config.watchdogIdleMs,
 		maxRePokes: config.watchdogMaxRePokes,
 		onFire: () => {
@@ -761,6 +779,7 @@ export default function (pi: ExtensionAPI) {
 		if (action === "on" || action === "trigger") {
 			autoPokeArmed = true;
 			pokeExplicitlyOff = false;
+			escPokePaused = false;
 			cycle = freshCycleFlags();
 			settledWithoutProgress = 0;
 			lastChallengedSignature = undefined;
@@ -793,19 +812,78 @@ export default function (pi: ExtensionAPI) {
 	// Events
 	// ------------------------------------------------------------------------
 
+	pi.on("agent_end", (event) => {
+		// Record the most recent run's abort status straight from the run's
+		// own messages; agent_settled reads this (it fires after agent_end).
+		const messages = event.messages as Array<{ role?: string; stopReason?: string; errorMessage?: string }>;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const m = messages[i];
+			if (m.role === "assistant") {
+				lastRunAborted = m.stopReason === "aborted" || looksInterrupted(m.stopReason, m.errorMessage);
+				break;
+			}
+		}
+		watchdog.notifyActivity();
+	});
+
+	pi.on("agent_start", (_event, ctx) => {
+		// A new run means the user (or machinery) re-engaged: an Esc pause
+		// lifts outside the abort-correlation window where the just-triggered
+		// teardown is still settling (pi-simple-goal's maybeResumeOnActivity).
+		if (escPokePaused && Date.now() - lastEscapeAt > ESCAPE_ABORT_WINDOW_MS) {
+			escPokePaused = false;
+			if (config.enabled && config.autoPoke && !pokeExplicitlyOff && pokeUiAllowed) {
+				autoPokeArmed = true;
+				cycle = freshCycleFlags();
+			}
+			refreshWidget(ctx);
+		}
+		watchdog.notifyActivity();
+	});
+
+	pi.on("session_before_compact", () => {
+		watchdog.notifyActivity(); // compaction can run long; never starve the watchdog
+	});
+	pi.on("session_compact", () => {
+		watchdog.notifyActivity();
+	});
+	pi.on("session_compact_failed", () => {
+		watchdog.notifyActivity();
+	});
+
 	pi.on("session_start", (_event, ctx) => {
 		watchdogCtx = ctx;
 		watchdog.notifyActivity();
 		idleNudgeSent = false;
 		pendingObservations.length = 0;
 		cycle = freshCycleFlags();
+		lastRunAborted = false;
 		settledWithoutProgress = 0;
 		lastSettledSignature = undefined;
 		lastChallengedSignature = undefined;
 		lastPokeTargets = undefined;
 		pokeExplicitlyOff = false;
+		escPokePaused = false;
+		lastEscapeAt = 0;
 		pokeUiAllowed = ctx.hasUI;
 		autoPokeArmed = config.autoPoke && ctx.hasUI;
+		// TUI only: watch raw terminal input for the Escape key so an aborted
+		// run can be correlated with the user's actual keypress (pi-simple-goal
+		// pattern). stopReason alone is unreliable: provider stacks can
+		// finalize an abort as a generic error naming the abort.
+		try {
+			const uictx = ctx as { mode?: string; ui: { onTerminalInput?: (cb: (data: string) => unknown) => () => void } };
+			if (uictx.mode === "tui" && typeof uictx.ui.onTerminalInput === "function") {
+				unsubscribeTerminalInput = uictx.ui.onTerminalInput((data) => {
+					if (data === "\x1b" || data === "\x1b\x1b" || data === "\x1b[27u") {
+						lastEscapeAt = Date.now();
+					}
+					return undefined;
+				});
+			}
+		} catch {
+			// Non-TUI or older pi: aborts fall back to machinery classification.
+		}
 		reconstructState(ctx);
 		refreshWidget(ctx);
 	});
@@ -857,10 +935,19 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx.isIdle()) return;
 		// jcode's Esc: an interrupted run disarms auto-poke entirely and
 		// injects no follow-up of any kind.
-		if (wasLastRunAborted(ctx)) {
-			disarm();
-			pokeExplicitlyOff = true; // Esc = the user said stop; new work must not re-arm.
-			refreshWidget(ctx);
+		if (wasLastRunAborted()) {
+			// Escape correlation (pi-simple-goal pattern): only an aborted run
+			// with a RECENT raw Escape keypress behind it is the user's stop —
+			// that quiets the settle and pauses the poke until the next run.
+			// Any other abort (compaction, ctx.abort(), transport, provider
+			// stacks mislabeling the interrupt) is machinery: stay quiet and keep
+			// the cycle armed; the watchdog covers a genuinely lost continuation.
+			if (lastEscapeAt > 0 && Date.now() - lastEscapeAt <= ESCAPE_ABORT_WINDOW_MS) {
+				disarm();
+				escPokePaused = true; // not sticky: the next agent run lifts it
+				refreshWidget(ctx);
+				return;
+			}
 			return;
 		}
 		if (!autoPokeArmed) {
