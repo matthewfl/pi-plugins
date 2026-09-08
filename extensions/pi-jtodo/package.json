@@ -1,0 +1,48 @@
+{
+	"name": "@matthewfl/pi-jtodo",
+	"version": "0.0.1",
+	"description": "Quality-gated todo tool for Pi: confidence scores with tool-owned histories, plan and per-goal assessments, write-time ownership rejection, turn-end completion/spike gates, deferred quality digests, auto-poke continuation, starvation watchdog, and a live todo strip.",
+	"type": "module",
+	"scripts": {
+		"test": "node tests/test-todo.cjs"
+	},
+	"license": "MIT",
+	"author": "matthewfl",
+	"homepage": "https://github.com/matthewfl/pi-plugins/tree/master/extensions/pi-jtodo",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/matthewfl/pi-plugins.git",
+		"directory": "extensions/pi-jtodo"
+	},
+	"bugs": {
+		"url": "https://github.com/matthewfl/pi-plugins/issues"
+	},
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"todo",
+		"quality-gates",
+		"agent",
+		"planning"
+	],
+	"files": [
+		"src",
+		"tests",
+		"README.md",
+		"LICENSE"
+	],
+	"publishConfig": {
+		"access": "public"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-tui": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@sinclair/typebox": "*"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	}
+}
