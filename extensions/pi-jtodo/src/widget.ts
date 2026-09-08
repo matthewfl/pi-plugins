@@ -32,6 +32,8 @@ export interface WidgetRuntime {
 	armed: boolean;
 	/** An Escape-paused cycle: suppressed until the user re-engages */
 	escPaused?: boolean;
+	/** Epoch ms when a delayed poke fires; 0 = none pending (pokeDelayMs). */
+	pokePendingAt?: number;
 	gateAttempts: number;
 	gateMaxAttempts: number;
 	/** Ids of the todos that caused the most recent poke/gate challenge */
@@ -107,11 +109,20 @@ function buildLeftColumn(
 	// user has been seeing.
 	let status: string;
 	if (!allSettled) {
-		status = runtime.armed
-			? "· auto-poke"
-			: runtime.escPaused
+		const pendingIn =
+			runtime.pokePendingAt && runtime.pokePendingAt > 0
+				? Math.max(1, Math.ceil((runtime.pokePendingAt - Date.now()) / 1000))
+				: 0;
+		// A pause (Escape, or typing during the poke window) outranks the armed
+		// state: the cycle stays armed underneath but is held, so the user must
+		// see "poke paused", not a misleading "auto-poke".
+		status = runtime.escPaused
 				? "· poke paused"
-				: "· poke off";
+				: runtime.armed
+					? pendingIn > 0
+						? `· poke in ${pendingIn}s`
+						: "· auto-poke"
+					: "· poke off";
 	} else if (summary.needs_validation) {
 		status =
 			runtime.gateAttempts > 0

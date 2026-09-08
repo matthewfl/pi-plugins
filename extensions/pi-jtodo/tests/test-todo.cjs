@@ -17,6 +17,13 @@ const os = require("node:os");
 const path = require("node:path");
 const fs = require("node:fs");
 
+// Point the extension's config at a scratch state dir BEFORE its module
+// loads: the e2e suite runs with a fast pokeDelayMs (400ms) so delayed-poke
+// scenarios exercise the real scheduler without waiting the real 20s.
+const TEST_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-jtodo-cfg-"));
+fs.writeFileSync(path.join(TEST_STATE_DIR, "config.json"), JSON.stringify({ pokeDelayMs: 400 }));
+process.env.PI_JTODO_STATE_DIR = TEST_STATE_DIR;
+
 let PI_PKG;
 try {
 	PI_PKG = path.dirname(require.resolve("@earendil-works/pi-coding-agent/package.json"));
@@ -39,6 +46,31 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 async function freshSession(extraLoaderOptions) {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-jtodo-test-"));
+	// Recording UI context: bindExtensions() fires session_start (arming +
+	// branch replay + raw-input listener), widgets/notices are recorded, and
+	// tests can inject synthetic keystrokes (the Esc/typing paths are
+	// TUI-only otherwise — this closes the harness blind spot).
+	const rec = { inputHandler: undefined, widgets: [], notifies: [] };
+	const uiContext = {
+		select: async () => undefined,
+		confirm: async () => false,
+		input: async () => undefined,
+		editor: async () => undefined,
+		notify: (message, type) => { rec.notifies.push({ message, type }); },
+		onTerminalInput: (handler) => {
+			rec.inputHandler = handler;
+			return () => { if (rec.inputHandler === handler) rec.inputHandler = undefined; };
+		},
+		setStatus: () => {},
+		setWorkingMessage: () => {},
+		setWorkingVisible: () => {},
+		setWorkingIndicator: () => {},
+		setWidget: (key, content) => {
+			const i = rec.widgets.findIndex((w) => w.key === key);
+			if (i >= 0) rec.widgets.splice(i, 1);
+			if (content !== undefined) rec.widgets.push({ key, content });
+		},
+	};
 	const loader = new pi.DefaultResourceLoader({
 		cwd,
 		agentDir: pi.getAgentDir(),
@@ -53,7 +85,10 @@ async function freshSession(extraLoaderOptions) {
 		resourceLoader: loader,
 		tools: ["todo"],
 	});
+	await session.bindExtensions({ uiContext, mode: "tui" });
 	return {
+		rec,
+		sendKeys: (data) => { if (rec.inputHandler) rec.inputHandler(data); },
 		session,
 		exec: (params, signal) =>
 			session
@@ -389,7 +424,7 @@ async function suiteA() {
 			alias: { "@earendil-works/pi-tui": `${PI_PKG}/node_modules/@earendil-works/pi-tui/dist/index.js` },
 		});
 		const { createWatchdog } = await jiti.import(path.join(EXT_DIR, "watchdog.ts"));
-		let t = 0, armed = true, idle = true, open = 3, aborted = false;
+		let t = 0, armed = true, idle = true, open = 3, aborted = false, paused = false;
 		const fires = [], starves = [];
 		const wd = createWatchdog({
 			now: () => t,
@@ -397,6 +432,7 @@ async function suiteA() {
 			isIdle: () => idle,
 			incompleteCount: () => open,
 			wasAborted: () => aborted,
+			isPaused: () => paused,
 			idleMs: 90_000,
 			maxRePokes: 3,
 			onFire: (n) => fires.push(n),
@@ -428,10 +464,47 @@ async function suiteA() {
 		// unarmed never fires
 		armed = false; aborted = false; t += 400_000; wd.tick();
 		const unarmedQuiet = fires.length === 4;
-		if (fires[0] === 1 && fires[1] === 2 && postponed && capped && resetWorks && settledQuiet && abortWins && unarmedQuiet) {
-			ok("T14 watchdog", "fire/postpone/cap/reset/settled-quiet/abort/unarmed all correct");
+		// paused cycle (Esc or typing took over): watchdog stays quiet and the
+		// idle window restarts each paused tick, so unpausing gets a fresh window
+		armed = true; paused = true; t += 400_000; wd.tick();
+		const pausedQuiet = fires.length === 4;
+		paused = false; t += 50_000; wd.tick(); // window restarted by the paused tick
+		const pausedWindowRestarted = fires.length === 4;
+		t += 91_000; wd.tick(); // fresh full window after unpausing -> 5th fire
+		const resumedAfterPause = fires.length === 5 && fires.at(-1) === 1;
+		if (fires[0] === 1 && fires[1] === 2 && postponed && capped && resetWorks && settledQuiet && abortWins && unarmedQuiet && pausedQuiet && pausedWindowRestarted && resumedAfterPause) {
+			ok("T14 watchdog", "fire/postpone/cap/reset/settled-quiet/abort/unarmed/paused-quiet all correct");
 		} else {
-			bad("T14 watchdog", JSON.stringify({ fires, starves, postponed, capped, resetWorks, settledQuiet, abortWins, unarmedQuiet }));
+			bad("T14 watchdog", JSON.stringify({ fires, starves, postponed, capped, resetWorks, settledQuiet, abortWins, unarmedQuiet, pausedQuiet, pausedWindowRestarted, resumedAfterPause }));
+		}
+	});
+
+	// T20: delayed-poke scheduler (pure timer module, real clock).
+	await run("T20 poke scheduler", async () => {
+		const { createJiti } = require(`${PI_PKG}/node_modules/jiti/lib/jiti.cjs`);
+		const jiti = createJiti(__filename, {
+			alias: { "@earendil-works/pi-tui": `${PI_PKG}/node_modules/@earendil-works/pi-tui/dist/index.js` },
+		});
+		const { createPokeScheduler } = await jiti.import(path.join(EXT_DIR, "poke-scheduler.ts"));
+		const fired = [];
+		const s = createPokeScheduler(80);
+		const idleStart = !s.isPending() && s.deadlineAt() === 0;
+		s.schedule(() => fired.push("a"));
+		const pending = s.isPending() && s.deadlineAt() > Date.now();
+		s.cancel();
+		const cancelWorks = !s.isPending() && fired.length === 0 && s.deadlineAt() === 0;
+		s.schedule(() => fired.push("a"));
+		s.schedule(() => fired.push("b")); // replaces the pending poke
+		await sleep(200);
+		const firedOnceLatest = fired.join(",") === "b" && !s.isPending();
+		const zeroDelay = createPokeScheduler(0);
+		const syncFired = [];
+		zeroDelay.schedule(() => syncFired.push("now"));
+		const immediate = syncFired.join(",") === "now" && !zeroDelay.isPending();
+		if (idleStart && pending && cancelWorks && firedOnceLatest && immediate) {
+			ok("T20 poke scheduler", "schedule/cancel/deadline/replacement/zero-delay all correct");
+		} else {
+			bad("T20 poke scheduler", JSON.stringify({ idleStart, pending, cancelWorks, firedOnceLatest, immediate, fired }));
 		}
 	});
 
@@ -954,7 +1027,7 @@ async function runScenario(name, script, assertions) {
 			});
 		},
 	};
-	await run(name, async ({ session }) => {
+	await run(name, async ({ session, rec }) => {
 		await session.setModel(MOCK_MODEL);
 		let abortTimerFired = false;
 		if (script.abortAtCall) {
@@ -965,6 +1038,17 @@ async function runScenario(name, script, assertions) {
 			const abortWhenStarted = () => {
 				if (calls.length >= script.abortAtCall) {
 					abortTimerFired = true;
+					// Raw Escape first (TUI Esc = user stop): this is exactly what the
+					// real terminal delivers to the listener before pi aborts the run.
+					if (script.escBeforeAbort && rec.inputHandler) {
+						rec.inputHandler("\x1b");
+						try {
+							const w = rec.widgets.find((x) => x.key === "pi-jtodo");
+							const th = { fg: (_c, s) => String(s), bold: (s) => String(s) };
+							const component = typeof w?.content === "function" ? w.content(null, th) : w?.content;
+							script.escPaint = (component?.render?.(120) ?? []).map(String);
+						} catch { script.escPaint = []; }
+					}
 					if (script.compactInsteadOfAbort) session.compact();
 					else session.abort();
 					// Safety net: if the abort somehow never reaches the mock, release
@@ -982,10 +1066,34 @@ async function runScenario(name, script, assertions) {
 		let prompted = false;
 		let aborted = false;
 		let resumed = false;
+		let inputArmed = false;
+		let inputSent = false;
 		while (Date.now() < deadline) {
 			if (!prompted && script.promptAfter && calls.length >= script.promptAfter) {
 				prompted = true;
 				void session.prompt(script.promptText ?? "continue");
+			}
+			if (!inputArmed && script.inputAfter && calls.length >= script.inputAfter.call) {
+				inputArmed = true;
+				// Synthetic keystroke lands while the session is idle with a poke
+				// pending (the typing/Esc paths are TUI-only otherwise).
+				setTimeout(() => {
+					inputSent = true;
+					if (rec.inputHandler) rec.inputHandler(script.inputAfter.data);
+					// Snapshot the paint synchronously: the widget is a live thunk
+					// factory, so building + rendering it later would show the final
+					// state instead of the paused moment.
+					try {
+						const w = rec.widgets.find((x) => x.key === "pi-jtodo");
+						const th = { fg: (_c, s) => String(s), bold: (s) => String(s) };
+						const component = typeof w?.content === "function" ? w.content(null, th) : w?.content;
+						script.inputAfter.paint = (component?.render?.(120) ?? []).map(String);
+					} catch { script.inputAfter.paint = []; }
+				}, script.inputAfter.atMs);
+			}
+			if (inputSent && script.promptAfterInput && !prompted) {
+				prompted = true;
+				void session.prompt(script.promptText ?? "resume");
 			}
 			if (!aborted && script.abortAtCall && calls.length >= script.abortAtCall) {
 				aborted = true; // bookkeeping only; the timer above fired the Esc
@@ -1016,7 +1124,7 @@ async function runScenario(name, script, assertions) {
 			(e) => e.type === "message" && e.message?.role === "toolResult" && e.message?.toolName === "todo",
 		);
 		const lastDetails = todoResults.at(-1)?.message?.details;
-		await assertions({ calls, customs, lastDetails, entries });
+		await assertions({ calls, customs, lastDetails, entries, widgets: rec.widgets });
 	}, { extensionFactories: [mockFactory] });
 }
 
@@ -1265,6 +1373,127 @@ async function suiteB() {
 			.map((e) => e.message.stopReason);
 		if (stopReasons.includes("aborted")) ok("B6 compaction abort recorded", `stopReasons=${JSON.stringify(stopReasons)}`);
 		else bad("B6 compaction abort recorded", `no aborted stopReason; stopReasons=${JSON.stringify(stopReasons)}`);
+	});
+
+	// B7: typing during the pokeDelayMs window cancels the pending poke and
+	// pauses the cycle; the pause lifts at the next agent run (goal-plugin
+	// pattern) and the resumed run finishes cleanly.
+	const SCRIPT_B7 = {
+		call(step) {
+			if (step === 1) {
+				return {
+					type: "toolCall", id: "call-open", name: "todo",
+					arguments: {
+						todos: [{ content: "typing-cancel guard", status: "in_progress", priority: "high", id: "t1", group: "tc", confidence: 96 }],
+						plan: { user_intention: "typing cancel e2e", understands_user_intent: 97 },
+						goals: [{ group: "tc", closed_feedback_loop: 97, feedback_loop: "typing cancels the pending poke" }],
+					},
+				};
+			}
+			if (step === 3) {
+				return {
+					type: "toolCall", id: "call-done", name: "todo",
+					arguments: {
+						todos: [{ content: "typing-cancel guard", status: "completed", priority: "high", id: "t1", group: "tc", confidence: 96, completion_confidence: 96 }],
+						goals: [{ group: "tc", closed_feedback_loop: 97, feedback_loop: "typing cancels the pending poke", end_to_end_ownership: 96 }],
+					},
+				};
+			}
+			return null;
+		},
+		text(step) {
+			if (step === 2) return "Todos written.";
+			return "Done after the resume.";
+		},
+		inputAfter: { call: 2, atMs: 150, data: "x" },
+		promptAfterInput: true,
+		promptText: "resume working on the todos",
+		calls: 4,
+	};
+	await runScenario("B7 typing cancels the pending poke", SCRIPT_B7, async ({ customs, widgets, lastDetails }) => {
+		if (customs.length === 0) ok("B7 typing cancel + pause", "the user keystroke canceled the pending poke; the resume run lifted the pause and finished quietly");
+		else bad("B7 typing cancel + pause", `customs=${JSON.stringify(customs.map((t) => t.slice(0, 60)))}`);
+		const pausedPaint = SCRIPT_B7.inputAfter.paint?.some((l) => l.includes("poke paused"));
+		if (pausedPaint) ok("B7 widget pause paint", "the widget bottom line rendered 'poke paused' while held");
+		else bad("B7 widget pause paint", JSON.stringify(SCRIPT_B7.inputAfter.paint ?? null, (k, v) => (typeof v === "string" ? v.replace(/\x1b\[[0-9;]*m/g, "") : v)));
+		const done = lastDetails?.todos?.[0]?.status === "completed";
+		if (done) ok("B7 resume completed the todo", "the resumed run closed the item and the cycle ended clean");
+		else bad("B7 resume completed the todo", JSON.stringify(lastDetails?.todos));
+	});
+
+	// B8: Escape during the poke window cancels the pending poke and holds the
+	// pause for the Esc window; a resume inside that window stays quiet.
+	const SCRIPT_B8 = {
+		call(step) {
+			if (step === 1) {
+				return {
+					type: "toolCall", id: "call-open", name: "todo",
+					arguments: {
+						todos: [{ content: "esc-window guard", status: "in_progress", priority: "high", id: "e1", group: "ew", confidence: 96 }],
+						plan: { user_intention: "esc window e2e", understands_user_intent: 97 },
+						goals: [{ group: "ew", closed_feedback_loop: 97, feedback_loop: "esc holds the pause inside the window" }],
+					},
+				};
+			}
+			return null;
+		},
+		text(step) {
+			if (step === 2) return "Todos written.";
+			return "Resumed inside the Esc window, still working.";
+		},
+		inputAfter: { call: 2, atMs: 150, data: "\x1b" },
+		promptAfterInput: true,
+		promptText: "resume while the Esc window is open",
+		calls: 3,
+	};
+	await runScenario("B8 Esc during poke window holds the pause", SCRIPT_B8, async ({ customs, widgets }) => {
+		if (customs.length === 0) ok("B8 esc cancel + held pause", "Escape canceled the pending poke and the in-window resume settle stayed quiet");
+		else bad("B8 esc cancel + held pause", `customs=${JSON.stringify(customs.map((t) => t.slice(0, 60)))}`);
+		const pausedPaint = SCRIPT_B8.inputAfter.paint?.some((l) => l.includes("poke paused"));
+		if (pausedPaint) ok("B8 widget pause paint", "'poke paused' rendered during the held pause");
+		else bad("B8 widget pause paint", JSON.stringify(SCRIPT_B8.inputAfter.paint ?? null, (k, v) => (typeof v === "string" ? v.replace(/\x1b\[[0-9;]*m/g, "") : v)));
+	});
+
+	// B9: a raw Escape observed right before an abort classifies the run as the
+	// user's stop — the settle disarms and pauses instead of re-poking. This is
+	// the regression pin for the missing-constant crash the old suite missed
+	// (the Esc path only runs when terminal input has been seen).
+	const SCRIPT_B9 = {
+		call(step) {
+			if (step === 1) {
+				return {
+					type: "toolCall", id: "call-open", name: "todo",
+					arguments: {
+						todos: [{ content: "user-esc guard", status: "in_progress", priority: "high", id: "u1", group: "ue", confidence: 96 }],
+						plan: { user_intention: "user esc e2e", understands_user_intent: 97 },
+						goals: [{ group: "ue", closed_feedback_loop: 97, feedback_loop: "user Esc pauses the poke" }],
+					},
+				};
+			}
+			return null;
+		},
+		text(step) {
+			if (step === 2) return "Todos written.";
+			if (step === 3) return "Poked: working on it, mid-stream.";
+			return "Resumed inside the Esc window.";
+		},
+		abortAtCall: 3,
+		escBeforeAbort: true,
+		resumeText: "resume after the user interrupt",
+		calls: 4,
+	};
+	await runScenario("B9 user Esc abort pauses the poke", SCRIPT_B9, async ({ customs, entries, widgets }) => {
+		const pokes = customs.filter((t) => t.includes("You have 1 incomplete todo."));
+		if (pokes.length === 1) ok("B9 user-Esc settle quiet", "poke #1 at the write settle; the Esc-aborted settle and the in-window resume settle injected nothing");
+		else bad("B9 user-Esc settle quiet", `pokes=${pokes.length} customs=${JSON.stringify(customs.map((t) => t.slice(0, 60)))}`);
+		const stopReasons = entries
+			.filter((e) => e.type === "message" && e.message?.role === "assistant")
+			.map((e) => e.message.stopReason);
+		if (stopReasons.includes("aborted")) ok("B9 aborted run recorded", `stopReasons=${JSON.stringify(stopReasons)}`);
+		else bad("B9 aborted run recorded", `stopReasons=${JSON.stringify(stopReasons)}`);
+		const pausedPaint = SCRIPT_B9.escPaint?.some((l) => l.includes("poke paused"));
+		if (pausedPaint) ok("B9 widget pause paint", "'poke paused' rendered right after the user Esc");
+		else bad("B9 widget pause paint", JSON.stringify(SCRIPT_B9.escPaint ?? null, (k, v) => (typeof v === "string" ? v.replace(/\x1b\[[0-9;]*m/g, "") : v)));
 	});
 }
 

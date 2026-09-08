@@ -90,6 +90,7 @@ import { normalizeTodoInput } from "./normalize.js";
 import { TodoParams, type TodoParamsInput } from "./schema.js";
 import { TodoListComponent } from "./viewer.js";
 import { TODO_WIDGET_ID, makeTodoWidget } from "./widget.js";
+import { createPokeScheduler } from "./poke-scheduler.js";
 import { createWatchdog } from "./watchdog.js";
 
 // ============================================================================
@@ -167,6 +168,15 @@ export default function (pi: ExtensionAPI) {
 	// re-arms, per the user's "stop the poke for the next while" rule.
 	let escPokePaused = false;
 	let unsubscribeTerminalInput: (() => void) | undefined;
+	// pi-simple-goal restartDelayMs pattern (see sendSettlePoke): the settle
+	// poke can wait pokeDelayMs before firing; any terminal input during the
+	// window cancels it and pauses poking until the next agent run.
+	// 0 = immediate (pure jcode).
+	const pokeScheduler = createPokeScheduler(config.pokeDelayMs);
+	let pokeTickTimer: NodeJS.Timeout | undefined;
+	// Whether the raw-input listener is subscribed (TUI only). A delayed
+	// poke is only safe when typing can cancel it; otherwise fire immediately.
+	let terminalInputActive = false;
 	// Whether poking is allowed at all. session_start (when emitted — the
 	// SDK harness and some embedders never emit it) re-derives this from
 	// its ctx.hasUI; elsewhere starts optimistic, matching the module-level
@@ -181,6 +191,7 @@ export default function (pi: ExtensionAPI) {
 	let idleNudgeSent = false;
 
 	function disarm() {
+		cancelPendingPoke();
 		autoPokeArmed = false;
 		lastPokeTargets = undefined;
 		cycle = freshCycleFlags();
@@ -255,6 +266,7 @@ export default function (pi: ExtensionAPI) {
 						() => ({
 							armed: autoPokeArmed,
 							escPaused: escPokePaused,
+							pokePendingAt: pokeScheduler.deadlineAt(),
 							gateAttempts: cycle.gateAttempts,
 							gateMaxAttempts: config.completionGateMaxAttempts,
 							pokeTargets: lastPokeTargets,
@@ -265,6 +277,55 @@ export default function (pi: ExtensionAPI) {
 			}
 		} catch {
 			// display-only; never let the widget break gate logic
+		}
+	}
+
+	/** Cancel a pending delayed poke (if any) and stop its countdown tick. */
+	function cancelPendingPoke(): void {
+		pokeScheduler.cancel();
+		if (pokeTickTimer !== undefined) {
+			clearInterval(pokeTickTimer);
+			pokeTickTimer = undefined;
+		}
+	}
+
+	/**
+	 * Send the settle poke, honoring pokeDelayMs (pi-simple-goal's restart
+	 * countdown pattern): schedule it so the user can take over during the
+	 * window — any typing cancels the poke and pauses the cycle — or fire
+	 * immediately when no delay is configured, the raw-input listener is not
+	 * subscribed (nothing could cancel it), or this is a manual trigger.
+	 */
+	function sendSettlePoke(ctx: ExtensionContext, immediate: boolean): void {
+		const fire = (): void => {
+			cancelPendingPoke();
+			const todos = incompleteTodos();
+			if (!config.enabled || !autoPokeArmed || escPokePaused || todos.length === 0) {
+				return; // state changed while the poke waited
+			}
+			if (watchdogCtx && !watchdogCtx.isIdle()) {
+				return; // something already restarted the agent
+			}
+			watchdog.notifyActivity();
+			lastPokeTargets = new Set(todos.map((t) => t.id));
+			notify(
+				ctx,
+				`👉 ${todos.length} incomplete todo${todos.length === 1 ? "" : "s"}. We poked it for you. ${NOTICE_POKE_OFF_HINT}`,
+			);
+			void sendGateFollowUp(buildAutoPokeMessage(todos.length));
+			refreshWidget(ctx);
+		};
+		if (!immediate && config.pokeDelayMs > 0 && terminalInputActive) {
+			pokeScheduler.schedule(fire);
+			if (pokeTickTimer === undefined) {
+				pokeTickTimer = setInterval(() => {
+					if (watchdogCtx) refreshWidget(watchdogCtx);
+				}, 1000);
+				if (typeof pokeTickTimer.unref === "function") pokeTickTimer.unref();
+			}
+			refreshWidget(ctx); // surface "poke in Ns" immediately
+		} else {
+			fire();
 		}
 	}
 
@@ -481,7 +542,7 @@ export default function (pi: ExtensionAPI) {
 	 * completion-confidence and spike gates (budgeted), then disarm with a
 	 * done notice.
 	 */
-	async function runTurnEndCheck(ctx: ExtensionContext): Promise<void> {
+	async function runTurnEndCheck(ctx: ExtensionContext, immediatePoke = false): Promise<void> {
 		const todos = state.todos;
 		if (todos.length === 0) {
 			// jcode: a settle with no todos at all silently disarms the poke.
@@ -492,6 +553,12 @@ export default function (pi: ExtensionAPI) {
 
 		const incomplete = incompleteTodos();
 		if (incomplete.length > 0) {
+			if (escPokePaused) {
+				// The user paused poking (Escape, or typing during the poke
+				// window): quiet until the next agent run lifts the pause.
+				refreshWidget(ctx);
+				return;
+			}
 			cycle.gateAttempts = 0;
 			if (config.maxConsecutivePokesWithoutProgress > 0) {
 				const signature = JSON.stringify(
@@ -509,12 +576,10 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 			}
-			notify(
-				ctx,
-				`👉 ${incomplete.length} incomplete todo${incomplete.length === 1 ? "" : "s"}. We poked it for you. ${NOTICE_POKE_OFF_HINT}`,
-			);
-			lastPokeTargets = new Set(incomplete.map((t) => t.id));
-			await sendGateFollowUp(buildAutoPokeMessage(incomplete.length));
+			// The poke itself may be delayed (pokeDelayMs): sendSettlePoke
+			// schedules it so the user can take over by typing, or fires
+			// immediately for manual /todos poke triggers.
+			sendSettlePoke(ctx, immediatePoke);
 			return;
 		}
 
@@ -603,6 +668,8 @@ export default function (pi: ExtensionAPI) {
 		isIdle: () => watchdogCtx?.isIdle() ?? false,
 		incompleteCount: () => incompleteTodos().length,
 		wasAborted: () => lastRunAborted,
+		// The watchdog must not inject through an Esc- or typing-pause either.
+		isPaused: () => escPokePaused,
 		idleMs: config.watchdogIdleMs,
 		maxRePokes: config.watchdogMaxRePokes,
 		onFire: () => {
@@ -798,7 +865,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("Poke queued. We'll re-check for unfinished todos after this turn.", "info");
 				return;
 			}
-			await runTurnEndCheck(ctx);
+			await runTurnEndCheck(ctx, true);
 			refreshWidget(ctx);
 			return;
 		}
@@ -827,6 +894,9 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_start", (_event, ctx) => {
+		// A pending delayed poke is moot once a new run starts: this run's
+		// settle will schedule a fresh one if todos remain open.
+		cancelPendingPoke();
 		// A new run means the user (or machinery) re-engaged: an Esc pause
 		// lifts outside the abort-correlation window where the just-triggered
 		// teardown is still settling (pi-simple-goal's maybeResumeOnActivity).
@@ -854,6 +924,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		watchdogCtx = ctx;
 		watchdog.notifyActivity();
+		cancelPendingPoke(); // a stale delayed poke never crosses sessions
 		idleNudgeSent = false;
 		pendingObservations.length = 0;
 		cycle = freshCycleFlags();
@@ -875,14 +946,32 @@ export default function (pi: ExtensionAPI) {
 			const uictx = ctx as { mode?: string; ui: { onTerminalInput?: (cb: (data: string) => unknown) => () => void } };
 			if (uictx.mode === "tui" && typeof uictx.ui.onTerminalInput === "function") {
 				unsubscribeTerminalInput = uictx.ui.onTerminalInput((data) => {
+					watchdog.notifyActivity(); // any keystroke is user activity
 					if (data === "\x1b" || data === "\x1b\x1b" || data === "\x1b[27u") {
 						lastEscapeAt = Date.now();
+						// Escape = manual control (goal-plugin pattern): cancel any
+						// pending delayed poke and hold poking until the next run.
+						cancelPendingPoke();
+						if (!escPokePaused) {
+							escPokePaused = true;
+							refreshWidget(ctx);
+						}
+						return undefined;
+					}
+					if (pokeScheduler.isPending()) {
+						// Typing during the poke window cancels the poke and pauses
+						// the cycle (pi-simple-goal restart-countdown behavior).
+						cancelPendingPoke();
+						escPokePaused = true;
+						refreshWidget(ctx);
 					}
 					return undefined;
 				});
+				terminalInputActive = true;
 			}
 		} catch {
 			// Non-TUI or older pi: aborts fall back to machinery classification.
+			terminalInputActive = false;
 		}
 		reconstructState(ctx);
 		refreshWidget(ctx);
@@ -917,6 +1006,12 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", () => {
 		clearInterval(watchdogTimer);
+		cancelPendingPoke();
+		if (unsubscribeTerminalInput) {
+			unsubscribeTerminalInput();
+			unsubscribeTerminalInput = undefined;
+		}
+		terminalInputActive = false;
 		watchdogCtx = undefined;
 	});
 

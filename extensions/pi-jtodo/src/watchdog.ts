@@ -19,6 +19,8 @@ export interface WatchdogDeps {
 	isIdle: () => boolean;
 	incompleteCount: () => number;
 	wasAborted: () => boolean;
+	/** Esc- or typing-paused cycle: the watchdog must not inject either. */
+	isPaused: () => boolean;
 	idleMs: number;
 	maxRePokes: number;
 	/** Re-send the auto-poke follow-up (fire-and-forget is fine). */
@@ -46,6 +48,13 @@ export function createWatchdog(deps: WatchdogDeps): Watchdog {
 		tick() {
 			const now = deps.now();
 			if (!deps.isArmed() || !deps.isIdle()) {
+				lastActivity = now;
+				return;
+			}
+			if (deps.isPaused()) {
+				// A paused cycle (Escape, or typing during the poke window) means
+				// the user took control; the watchdog stays quiet and the window
+				// restarts so unpausing (next agent run) gets a fresh idle period.
 				lastActivity = now;
 				return;
 			}

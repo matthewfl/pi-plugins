@@ -41,6 +41,7 @@ Deliberately **not** ported from jcode: the `/overnight` mission mode (presumes 
 - **Write-time gate**: a write that closes a group (or the implicit ungrouped list) without an honest `end_to_end_ownership` claim is **rejected whole** — stored state is returned unchanged with an actionable message naming the failing groups. A first plan write with severely low intent gets an immediate in-band continuation.
 - **Turn-end gates** (when the agent settles): incomplete todos → auto-poke ("You have N incomplete todos. Continue working, or update the todo tool."). Fully settled → the deferred quality digest (intent/feedback-loop weak points), then the completion-confidence and confidence-spike gates — each naming the flagged `#id`s — with an attempt budget, an unchanged-signature early stop, and a done notice when validation passes.
 - **Follow-ups are attributed**: pokes, digests, and gate challenges travel as custom messages (LLM-visible as user-role text, transcript-visible as `pi-jtodo/followup`), so reload/resume never re-renders them as user prompts.
+- **The poke waits `pokeDelayMs` before firing** (default 20s, pi-simple-goal's restart-countdown pattern): when the agent stops with open todos the settle schedules the poke instead of sending it, and the widget shows `· poke in Ns` counting down. **If the user starts typing during the window, the poke is canceled and poking pauses** until the next agent run, so a user who is about to take over is never fought by the machine. The completion/spike gates, the deferred digest, the watchdog re-fire, and manual `/todos poke on|trigger` stay immediate — gates respond to the agent's own claims, manual pokes are explicit.
 - **Escape pauses, it does not silence** (pi-simple-goal pattern): a raw `\x1b` keypress within 5s of an aborted run marks it as the user's stop — the settle is quiet and the poke pauses until the user re-engages; the next agent run lifts the pause and re-arms. Aborts with no recent Escape behind them are machinery (compaction, `ctx.abort()`, transport, provider stacks mislabeling the interrupt as an error): their settle is quiet but the cycle stays armed and the starvation watchdog covers a lost continuation. The only sticky off is `/todos poke off`.
 
 ## Display
@@ -56,6 +57,7 @@ Deliberately **not** ported from jcode: the `/overnight` mission mode (presumes 
 {
 	"enabled": true,
 	"autoPoke": true,
+	"pokeDelayMs": 20000,
 	"completionGateMaxAttempts": 5,
 	"maxGateObservations": 256,
 	"maxConsecutivePokesWithoutProgress": 0,

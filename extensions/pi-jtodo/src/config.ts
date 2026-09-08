@@ -2,6 +2,7 @@
  * Optional per-user configuration: ~/.pi/agent/state/pi-jtodo/config.json
  * Missing or unreadable config falls back to defaults. Gate thresholds are
  * calibration constants (see constants.ts) and deliberately NOT configurable.
+ * PI_JTODO_STATE_DIR overrides the state directory (embedding/tests).
  */
 
 import * as fs from "node:fs";
@@ -13,6 +14,13 @@ export interface TodoConfig {
 	enabled: boolean;
 	/** Arm the auto-poke cycle when each session starts (TUI/RPC only). */
 	autoPoke: boolean;
+	/**
+	 * Delay before the settle poke fires when the agent stops with open
+	 * todos (pi-simple-goal restartDelayMs pattern). While the poke waits,
+	 * any terminal input (the user starts typing) cancels it and pauses
+	 * poking until the next agent run. 0 = immediate (pure jcode).
+	 */
+	pokeDelayMs: number;
 	/** Turn-end re-validation budget before the gate stalls and disarms. */
 	completionGateMaxAttempts: number;
 	/** Cap on the turn-scoped observation log; oldest dropped first. */
@@ -38,6 +46,7 @@ export interface TodoConfig {
 export const DEFAULT_CONFIG: TodoConfig = {
 	enabled: true,
 	autoPoke: true,
+	pokeDelayMs: 20_000,
 	completionGateMaxAttempts: TODO_COMPLETION_GATE_MAX_ATTEMPTS,
 	maxGateObservations: MAX_GATE_OBSERVATIONS,
 	maxConsecutivePokesWithoutProgress: 0,
@@ -52,14 +61,10 @@ export const DEFAULT_CONFIG: TodoConfig = {
 
 export function loadConfig(): TodoConfig {
 	try {
-		const p = path.join(
-			os.homedir(),
-			".pi",
-			"agent",
-			"state",
-			"pi-jtodo",
-			"config.json",
-		);
+		const stateDir =
+			process.env.PI_JTODO_STATE_DIR ??
+			path.join(os.homedir(), ".pi", "agent", "state", "pi-jtodo");
+		const p = path.join(stateDir, "config.json");
 		const parsed = JSON.parse(fs.readFileSync(p, "utf8"));
 		if (typeof parsed === "object" && parsed !== null) {
 			return { ...DEFAULT_CONFIG, ...parsed };
