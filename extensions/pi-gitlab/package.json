@@ -1,0 +1,21 @@
+{
+	"name": "pi-gitlab",
+	"version": "0.1.0",
+	"description": "GitLab MR/issue workflows for pi: file-as-interface (fetch \u2192 edit file \u2192 put) plus watches.",
+	"type": "module",
+	"license": "MIT",
+	"private": true,
+	"scripts": {
+		"test": "node --test test/*.test.ts",
+		"typecheck": "tsc -p tsconfig.json",
+		"load-check": "node scripts/rpc-load-check.mjs"
+	},
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"bin": {
+		"pi-gitlab": "./bin/pi-gitlab.ts"
+	}
+}
