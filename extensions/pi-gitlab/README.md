@@ -4,14 +4,15 @@ A [pi](https://github.com/earendil-works/pi-coding-agent) extension that lets
 the agent work with **GitLab merge requests and issues** — reading and
 replying to discussion threads, leaving code-review comments, updating
 descriptions or titles, resolving threads, and watching items for changes — while
-keeping the human in control of every write.
+keeping the human in control with review-gated writes by default.
 
 ## Why you might want it
 
-- **Nothing posts without your approval.** The agent never calls the GitLab
-  API to publish directly. It stages everything it wants to say as edits in
-  one local file; when it's done, you get a single review dialog with the
-  whole batch. Approve once, or cancel and nothing happens.
+- **Review before posting by default.** The agent stages everything it
+  wants to say as edits in one local file; when it's done, you get a single
+  review dialog with the whole batch. Approve once, or cancel and nothing
+  happens. Explicit bypass mode, disabling `confirmBeforePost`, and CLI
+  `put --submit` skip this dialog (see below).
 - **Clear attribution.** Every comment the agent posts carries a signature
   banner (`_🤖 Automatically written by pi-gitlab…_`), so other humans and
   your own later self can tell agent output apart from yours.
@@ -25,8 +26,15 @@ keeping the human in control of every write.
 
 ## Setup
 
-1. Load the extension in pi (e.g. put/symlink it into
-   `~/.pi/agent/extensions/` or load with `pi -e <path>`).
+Requires Node.js **22.19+**, Pi, and `git` on your `PATH` (used for
+three-way merges and diffs).
+
+1. Install the extension:
+   ```sh
+   pi install npm:@matthewfl/pi-gitlab
+   ```
+   Restart Pi (or run `/reload` in an existing session). To try it without
+   saving an installation, use `pi -e npm:@matthewfl/pi-gitlab`.
 2. Run `/gitlab-auth https://your-gitlab-host` inside pi. It walks you through
    creating a Personal Access Token with the `api` scope (it shows the token
    page URL for both newer and older GitLab versions), verifies the token
@@ -131,6 +139,22 @@ list call, not an investigation.
 
 ## Configuration reference (`~/.pi/agent/gitlab/config/config.json`)
 
+Example `config.json` with every key set to its default value:
+
+```json
+{
+  "confirmBeforePost": true,
+  "signatureHeader": "_🤖 Automatically written by pi-gitlab (AI agent). Review before acting._",
+  "botUsernames": [],
+  "watchIntervalSeconds": 120,
+  "bypassSignaturePatterns": [],
+  "servers": {}
+}
+```
+
+All keys are optional; omitted keys use these defaults. `servers` is empty
+by default; see the bot-trigger example above for per-server overrides.
+
 | key | default | meaning |
 |---|---|---|
 | `confirmBeforePost` | `true` | master safety switch. When `true`, `submit` shows the single review dialog before posting; when `false`, `submit` posts with no dialog — you are never asked. (The agent can always use `submit_bypass_user_review`, but is instructed to do so ONLY when you explicitly tell it to submit without your review.) |
@@ -148,17 +172,19 @@ the file forward safely.
 Other agent systems (plain shell scripts, another assistant, a cron job) can
 drive the same machinery without loading pi:
 
-```
-node extensions/pi-gitlab/bin/pi-gitlab.ts login <base-url>   # token via GITLAB_TOKEN env, --stdin, or a TTY prompt
-node extensions/pi-gitlab/bin/pi-gitlab.ts fetch <item-url>
-node extensions/pi-gitlab/bin/pi-gitlab.ts put [--dry-run|--submit] <item-url>
-node extensions/pi-gitlab/bin/pi-gitlab.ts watch <item-url> [--interval s]
-node extensions/pi-gitlab/bin/pi-gitlab.ts skill              # print the agent behavior guide (skills/gitlab-mr-review/SKILL.md)
+```sh
+npm install --global --omit=peer @matthewfl/pi-gitlab
+pi-gitlab login <base-url>   # token via GITLAB_TOKEN env, --stdin, or a TTY prompt
+pi-gitlab fetch <item-url>
+pi-gitlab put [--dry-run|--submit] <item-url>
+pi-gitlab watch <item-url> [--interval s]
+pi-gitlab skill             # print the agent behavior guide
 ```
 
-`npm link` inside `extensions/pi-gitlab` gives a global `pi-gitlab`
-alias (package.json `"bin"`) — optional; every invocation above also
-works with plain `node`. The file is executable on its own. Either way:
+The standalone CLI has no runtime npm dependencies; `--omit=peer` avoids
+installing the Pi host packages it does not need. The npm package ships a
+compiled JavaScript CLI, so no TypeScript runner is required. From a source
+checkout, `node bin/pi-gitlab.ts ...` also works on Node.js 22.19+. Either way:
 **one behavior guide** — the CLI reminders and `pi-gitlab skill` both
 carry the same SKILL.md the pi skill loads, so etiquette/trust/staging
 rules are maintained once.
@@ -192,13 +218,51 @@ mode)` (dry_run preview → submit with your approval or bypass when
 `confirmBeforePost=false`), and `gitlab_watch(url, action)` — plus one
 command (`/gitlab-auth`) and a bundled skill with workflow etiquette
 (`gitlab-mr-review`). The full file grammar, trust hierarchy, and rules the
-agent follows are in [`gitlab-plugin-plan.md`](../../gitlab-plugin-plan.md)
-and [`skills/gitlab-mr-review/SKILL.md`](skills/gitlab-mr-review/SKILL.md).
+agent follows are in
+[`skills/gitlab-mr-review/SKILL.md`](skills/gitlab-mr-review/SKILL.md).
 
 ## Development
 
-- Tests: `npm test` (node's native TS runner, no deps).
-- Typecheck: `npm run typecheck` (install `typescript` + `@types/node` and
-  symlink the pi packages as in this folder's `node_modules/`).
+Run these commands from `extensions/pi-gitlab` in the repository:
+
+```sh
+npm ci
+npm run typecheck
+npm test
+npm run build
+pi -e ./index.ts
+```
+
+- `npm run build` compiles the standalone CLI into `dist/` and copies its
+  behavior guide. Pi loads the TypeScript extension directly.
+- `npm run load-check` checks extension loading and the auth dialog via a
+  local Pi executable, using fake credentials and an isolated data directory.
+- `npm run package-check` packs and installs the tarball in a temporary
+  directory, checks the installed CLI and bundled guide, and runs the Pi
+  load check against the installed extension.
 - Live drivers under `scripts/` (auth setup, fetch/put/watch against a real
   instance) mirror the tool calls for testing without a model turn.
+
+## Publishing
+
+From `extensions/pi-gitlab`, with npm credentials authorized for the
+`@matthewfl` scope:
+
+```sh
+npm ci
+npm run typecheck
+npm test
+npm run package-check
+npm pack --dry-run   # builds the CLI and lists public package contents
+npm publish         # publishConfig.access is public
+```
+
+The initial version is `0.1.0`; increment `package.json`'s version for each
+subsequent release. Only runtime TypeScript modules, the compiled CLI, skills,
+README, license, and package metadata are included; tests, live drivers, and
+local configuration are excluded. `prepublishOnly` runs typechecking and tests,
+and `prepack` builds the CLI automatically.
+
+## License
+
+[MIT](LICENSE).

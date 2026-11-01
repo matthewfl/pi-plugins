@@ -1,21 +1,50 @@
 {
-	"name": "pi-gitlab",
+	"name": "@matthewfl/pi-gitlab",
 	"version": "0.1.0",
-	"description": "GitLab MR/issue workflows for pi: file-as-interface (fetch \u2192 edit file \u2192 put) plus watches.",
+	"description": "GitLab merge request and issue workflows for Pi: fetch, stage edits, review, publish, and watch for changes.",
 	"type": "module",
 	"license": "MIT",
-	"private": true,
+	"author": "matthewfl",
+	"homepage": "https://github.com/matthewfl/pi-plugins/tree/master/extensions/pi-gitlab",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/matthewfl/pi-plugins.git",
+		"directory": "extensions/pi-gitlab"
+	},
+	"bugs": {
+		"url": "https://github.com/matthewfl/pi-plugins/issues"
+	},
+	"keywords": ["pi-package", "pi-extension", "gitlab", "merge-request", "code-review"],
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"files": ["*.ts", "dist", "skills", "README.md", "LICENSE"],
+	"publishConfig": {
+		"access": "public"
+	},
 	"scripts": {
+		"build": "node scripts/build-cli.mjs",
 		"test": "node --test test/*.test.ts",
 		"typecheck": "tsc -p tsconfig.json",
-		"load-check": "node scripts/rpc-load-check.mjs"
+		"load-check": "node scripts/rpc-load-check.mjs",
+		"package-check": "node scripts/package-check.mjs",
+		"prepack": "npm run build",
+		"prepublishOnly": "npm run typecheck && npm test"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-ai": "^1.4.0",
+		"@earendil-works/pi-coding-agent": "^1.4.0",
+		"@types/node": "^22.18.0",
+		"typescript": "^5.9.3"
 	},
 	"pi": {
-		"extensions": [
-			"./index.ts"
-		]
+		"extensions": ["./index.ts"]
 	},
 	"bin": {
-		"pi-gitlab": "./bin/pi-gitlab.ts"
+		"pi-gitlab": "dist/bin/pi-gitlab.js"
 	}
 }

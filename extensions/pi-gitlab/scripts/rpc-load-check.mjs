@@ -10,8 +10,9 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const REPO = "/home/matthew/developer/agents";
+const PACKAGE = process.env.PI_GITLAB_PACKAGE ?? fileURLToPath(new URL("../", import.meta.url));
 const TEST_HOST = "https://gitlab.example.invalid";
 const FAKE_TOKEN = "glpat-FAKE-load-check";
 
@@ -37,8 +38,8 @@ function dump() {
 
 child = spawn(
 	"pi",
-	["--offline", "--mode", "rpc", "-e", "extensions/pi-gitlab", "--no-session"],
-	{ cwd: REPO, env: { ...process.env, PI_GITLAB_DIR: dataDir } },
+	["--offline", "--mode", "rpc", "--no-extensions", "-e", PACKAGE, "--no-session"],
+	{ cwd: dataDir, env: { ...process.env, PI_GITLAB_DIR: dataDir } },
 );
 
 let buf = "";
