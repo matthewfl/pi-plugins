@@ -9,10 +9,11 @@
 // to resolve @earendil-works/* packages; set PI_CODING_AGENT_DIR to the package
 // root, or have `pi` on PATH, to point it at one.
 
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const EXT_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -65,9 +66,6 @@ const aliases = {
 	// breaks whenever pi's packaging changes.
 	"@earendil-works/pi-coding-agent": path.join(EXT_DIR, "test", "sdk-shim.cjs"),
 	"@earendil-works/pi-agent-core": pkgPath("@earendil-works/pi-agent-core/dist/index.js"),
-	// Subpath entries the SDK chain imports internally (jiti prefix-append
-	// would turn ".../dist/index.js/node" into a nonexistent path).
-	"@earendil-works/pi-agent-core/node": pkgPath("@earendil-works/pi-agent-core/dist/node.js"),
 	"@earendil-works/pi-tui": pkgPath("@earendil-works/pi-tui/dist/index.js"),
 	"@earendil-works/pi-ai/providers/all": pkgPath("@earendil-works/pi-ai/dist/providers/all.js"),
 	"@earendil-works/pi-ai/compat": pkgPath("@earendil-works/pi-ai/dist/compat.js"),
@@ -101,6 +99,7 @@ async function makeWorld({ env = {}, goalActive = true, mode = "tui", flags = {}
 		statuses: new Map(),
 		sent: [],
 		execCalls: [],
+		shutdownCalls: 0,
 		appended: [],
 		inputHandler: undefined,
 		idle: true,
@@ -121,6 +120,7 @@ async function makeWorld({ env = {}, goalActive = true, mode = "tui", flags = {}
 		},
 		exec: async (cmd, args) => {
 			world.execCalls.push({ cmd, args });
+			if (world.notifyResult) return world.notifyResult();
 			return { stdout: "", stderr: "", code: 0, killed: false };
 		},
 	};
@@ -141,6 +141,7 @@ async function makeWorld({ env = {}, goalActive = true, mode = "tui", flags = {}
 		mode,
 		cwd: "/tmp",
 		isIdle: () => world.idle,
+		shutdown: () => { world.shutdownCalls++; },
 		sessionManager: {
 			getEntries: () => entries ?? [goalEntry],
 			getLeafId: () => "e1",
@@ -180,6 +181,35 @@ async function makeWorld({ env = {}, goalActive = true, mode = "tui", flags = {}
 		);
 	world.status = () => world.statuses.get("simple-goal");
 	return world;
+}
+
+// Real Node exit checks run separately so they cannot terminate the runner.
+if (process.env.GOAL_EXIT_CHILD) {
+	const { toolName, output, notifyFails, exitOnly } = JSON.parse(process.env.GOAL_EXIT_CHILD);
+	const w = await makeWorld({ mode: "rpc", entries: [], flags: {
+		"goal-set": "say hi", "goal-write-output": exitOnly ? undefined : output,
+		"goal-exit-when-done": true, "goal-notify-script": exitOnly ? undefined : "/test/notify",
+	} });
+	w.start();
+	if (w.sent[0]?.text !== "Goal set: say hi") throw new Error("RPC kickoff missing");
+	let notified = Boolean(exitOnly);
+	w.ctx.shutdown = () => {
+		if (!notified || (!exitOnly && readFileSync(output, "utf8") !== "hi\n世界")) {
+			throw new Error("Shutdown before notification/output finished");
+		}
+		if (!w.appended.some(e => e.data.active === false)) throw new Error("Goal not persisted");
+		console.log("shutdown after output and notification");
+		process.exit(0); // Pi's graceful shutdown explicitly passes 0 too.
+	};
+	w.notifyResult = async () => {
+		await sleep(30);
+		notified = true;
+		if (notifyFails) throw new Error("notification failed");
+		return { stdout: "", stderr: "", code: 0, killed: false };
+	};
+	await w.tools.get(toolName).execute("tc", toolName === "goal_complete"
+		? { summary: "hi\n世界" } : { reason: "hi\n世界" }, undefined, undefined, w.ctx);
+	throw new Error("Shutdown was not requested");
 }
 
 // Scenario 1: countdown appears, keypress cancels -> paused, input -> resumed.
@@ -607,6 +637,70 @@ async function makeWorld({ env = {}, goalActive = true, mode = "tui", flags = {}
 	check("paused during countdown typing", w.status() === "goal paused (send a message to continue)", w.status());
 	await w.handlers.get("message_update")({}, w.ctx); // stray event, no run
 	check("no-run activity does not resume", w.status() === "goal paused (send a message to continue)", w.status());
+}
+
+// Scenario 17: output-only mode, write errors, and calls without a goal.
+{
+	console.log("scenario 17: output files and failure handling");
+	const dir = mkdtempSync(path.join(tmpdir(), "pi-goal-test-"));
+	try {
+		for (const toolName of ["goal_complete", "goal_impossible"]) {
+			const output = path.join(dir, "output.txt");
+			writeFileSync(output, "old content that should be replaced");
+			const w = await makeWorld({ flags: { "goal-write-output": path.relative("/tmp", output) } });
+			w.start();
+			await w.tools.get(toolName).execute("tc", toolName === "goal_complete"
+				? { summary: "raw summary\n✓" } : { reason: "raw reason\n✓" }, undefined, undefined, w.ctx);
+			check(`${toolName} writes raw UTF-8 message, replacing file`, readFileSync(output, "utf8") ===
+				(toolName === "goal_complete" ? "raw summary\n✓" : "raw reason\n✓"));
+			check("output alone does not shut down", w.shutdownCalls === 0);
+		}
+		const clearedOutput = path.join(dir, "cleared-output");
+		const cleared = await makeWorld({ flags: { "goal-write-output": clearedOutput, "goal-exit-when-done": true } });
+		cleared.start();
+		await cleared.handlers.get("command:goal").handler("clear", cleared.ctx);
+		check("clearing a goal does not write or exit", !existsSync(clearedOutput) && cleared.shutdownCalls === 0);
+		const missing = path.join(dir, "missing", "output");
+		const w = await makeWorld({ flags: { "goal-write-output": missing, "goal-exit-when-done": true } });
+		w.start();
+		let failed = false;
+		try { await w.tools.get("goal_complete").execute("tc", { summary: "done" }, undefined, undefined, w.ctx); }
+		catch { failed = true; }
+		check("write failure errors without clearing goal or exiting", failed && w.shutdownCalls === 0 &&
+			!w.appended.some(e => e.data.active === false));
+		const noGoal = await makeWorld({ goalActive: false, flags: {
+			"goal-write-output": missing, "goal-exit-when-done": true,
+		} });
+		noGoal.start();
+		for (const toolName of ["goal_complete", "goal_impossible"]) {
+			const res = await noGoal.tools.get(toolName).execute("tc", { summary: "done", reason: "blocked" }, undefined, undefined, noGoal.ctx);
+			check(`${toolName} without goal does not write or exit`, res.isError && noGoal.shutdownCalls === 0 && !existsSync(missing));
+		}
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+// Scenario 18: real subprocess exit codes and delayed notification ordering.
+{
+	console.log("scenario 18: RPC kickoff and exit codes after side effects");
+	const dir = mkdtempSync(path.join(tmpdir(), "pi-goal-exit-"));
+	try {
+		for (const toolName of ["goal_complete", "goal_impossible"]) {
+			for (const { notifyFails, exitOnly } of [
+				{ notifyFails: false, exitOnly: false },
+				{ notifyFails: true, exitOnly: false },
+				{ notifyFails: false, exitOnly: true },
+			]) {
+				const output = path.join(dir, "output");
+				const child = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+					env: { ...process.env, GOAL_EXIT_CHILD: JSON.stringify({ toolName, output, notifyFails, exitOnly }) },
+					encoding: "utf8", timeout: 20000,
+				});
+				check(`${toolName} exits correctly, notifyFails=${notifyFails}, exitOnly=${exitOnly}`,
+					child.status === (toolName === "goal_complete" ? 0 : 10) &&
+					child.stdout.includes("shutdown after output and notification"), child.stderr);
+			}
+		}
+	} finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
 if (failures) {

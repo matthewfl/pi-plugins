@@ -24,7 +24,7 @@
  *   branch navigation.
  */
 
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import {
 	defineTool,
 	getAgentDir,
@@ -33,8 +33,9 @@ import {
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const CUSTOM_TYPE = "simple-goal";
 const GOAL_COMPLETE_TOOL = "goal_complete";
@@ -396,10 +397,10 @@ export default function (pi: ExtensionAPI) {
 		resumeGoal();
 	};
 
-	const runNotifyScript = (message: string) => {
+	const runNotifyScript = async (message: string) => {
 		const script = cfg().notifyScript;
 		if (!script) return;
-		pi.exec(script, [message], { timeout: 30_000 })
+		await pi.exec(expandHome(script), [message], { timeout: 30_000 })
 			.then((res) => {
 				if (res.code !== 0) {
 					const out = (res.stderr || res.stdout || "").trim();
@@ -415,6 +416,28 @@ export default function (pi: ExtensionAPI) {
 					"warning",
 				);
 			});
+	};
+
+	// Write before clearing the goal: a failed write remains a tool error with
+	// an active goal, so the agent can fix the path and retry rather than exit
+	// successfully without delivering the requested output.
+	const writeOutput = async (message: string, ctx: ExtensionContext) => {
+		const output = pi.getFlag("goal-write-output");
+		if (typeof output === "string" && output.length > 0) {
+			await writeFile(resolve(ctx.cwd, expandHome(output)), message, "utf8");
+		}
+	};
+
+	const exitWhenDone = (code: number, ctx: ExtensionContext) => {
+		if (pi.getFlag("goal-exit-when-done") !== true) return;
+		process.exitCode = code;
+		// Pi's graceful shutdown currently calls process.exit(0) explicitly.
+		// An exit listener preserves our status while still allowing Pi to
+		// flush RPC output, restore the terminal, and run session_shutdown.
+		process.once("exit", () => {
+			process.exitCode = code;
+		});
+		ctx.shutdown();
 	};
 
 	const nudgeGoal = (reason: "idle" | "stuck-tool") => {
@@ -501,9 +524,20 @@ export default function (pi: ExtensionAPI) {
 			"Script invoked as `script \"message from the agent\"` when the goal is marked complete or impossible.",
 		type: "string",
 	});
+	pi.registerFlag("goal-exit-when-done", {
+		description:
+			"Exit after goal notification and output writing finish (0=complete, 10=impossible).",
+		type: "boolean",
+		default: false,
+	});
+	pi.registerFlag("goal-write-output", {
+		description:
+			"Write the agent's goal summary or impossibility reason to this file when the goal is done.",
+		type: "string",
+	});
 	pi.registerFlag("goal-set", {
 		description:
-			'Initial goal for a fresh session: --goal-set "<goal>" or --goal-set /path/to/file.txt. Sets the goal and starts the agent loop in the TUI (also env PI_GOAL_SET).',
+			'Initial goal for a fresh session: --goal-set "<goal>" or --goal-set /path/to/file.txt. Sets the goal and starts the agent loop in TUI/RPC mode (also env PI_GOAL_SET).',
 		type: "string",
 	});
 
@@ -563,6 +597,7 @@ export default function (pi: ExtensionAPI) {
 	const goalCompleteTool = defineTool({
 		name: GOAL_COMPLETE_TOOL,
 		label: "Goal Complete",
+		executionMode: "sequential",
 		description:
 			"Mark the current /goal as complete. Only call this when the goal has actually been finished.",
 		parameters: Type.Object({
@@ -580,12 +615,14 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 			const completed = activeGoal.goal;
+			await writeOutput(params.summary, ctx);
 			activeGoal = undefined;
 			paused = false;
 			cancelRestart();
 			updateStatus();
 			await persistGoal(ctx);
-			runNotifyScript(`Goal completed: ${params.summary}`);
+			await runNotifyScript(`Goal completed: ${params.summary}`);
+			exitWhenDone(0, ctx);
 			return {
 				content: [{ type: "text", text: `Goal completed: ${params.summary}` }],
 				terminate: true,
@@ -597,6 +634,7 @@ export default function (pi: ExtensionAPI) {
 	const goalImpossibleTool = defineTool({
 		name: GOAL_IMPOSSIBLE_TOOL,
 		label: "Goal Impossible",
+		executionMode: "sequential",
 		description:
 			"Mark the current /goal as impossible or blocked. Explain what is blocking it.",
 		parameters: Type.Object({
@@ -616,12 +654,14 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 			const abandoned = activeGoal.goal;
+			await writeOutput(params.reason, ctx);
 			activeGoal = undefined;
 			paused = false;
 			cancelRestart();
 			updateStatus();
 			await persistGoal(ctx);
-			runNotifyScript(`Goal impossible: ${params.reason}`);
+			await runNotifyScript(`Goal impossible: ${params.reason}`);
+			exitWhenDone(10, ctx);
 			return {
 				content: [
 					{

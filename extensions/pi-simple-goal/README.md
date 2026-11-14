@@ -44,7 +44,7 @@ pi --goal-set "Add pagination to the users API and verify it with tests"
 pi --goal-set ./tasks/add-pagination.txt
 ```
 
-On a fresh session this sets and persists the goal and immediately kicks off the agent loop in the TUI (in print mode it only sets the goal). It applies only while the session has no goal history at all, so an in-session `/goal clear` or `/goal <other>` is never overridden by the flag on reload.
+On a fresh session this sets and persists the goal and immediately kicks off the agent loop in TUI or RPC mode (in print/JSON mode it only sets the goal). It applies only while the session has no goal history at all, so an in-session `/goal clear` or `/goal <other>` is never overridden by the flag on reload.
 
 While a goal is active, the extension:
 
@@ -56,6 +56,21 @@ While a goal is active, the extension:
 - exposes `goal_impossible` so the agent can report a blocker and stop cleanly;
 - invokes a configured notification script as `script "message from the agent"` when the goal is marked complete or impossible;
 - watches for idle sessions and long-running tools, then sends a message that triggers or steers the agent back toward the goal. A session opened or reloaded with an active goal and an idle agent starts the restart countdown immediately rather than waiting for the idle watchdog; pausing is per-session, so a `/reload` re-arms enforcement (press a key during the countdown to stay paused). Reloading mid-run just shows `goal active` — the countdown appears when that run ends.
+
+## One-shot command-line runs
+
+Use these CLI-only options together or independently:
+
+- `--goal-write-output <path>` writes the agent's exact `goal_complete` summary or `goal_impossible` reason as UTF-8 text, without a status prefix or added newline. It creates or overwrites the file; relative paths resolve against the session working directory, and a leading `~` expands to your home directory. The parent directory must already exist.
+- `--goal-exit-when-done` requests a graceful Pi shutdown after the output file is written and the notification script finishes. The exit status is **0** for complete and **10** for impossible. Without this flag, Pi stays open as usual (print/JSON modes naturally exit).
+
+For example, start an RPC agent that works immediately and exits when it resolves the goal:
+
+```sh
+pi --mode rpc --goal-set 'say hi' --goal-exit-when-done --goal-write-output /tmp/pi-goal-output
+```
+
+The output file contains only the agent's summary or blocker reason, not the RPC event stream. Notification script failures/timeouts remain warnings and do not change the goal's exit status. If the output file cannot be written, the goal tool fails without clearing the goal or requesting shutdown, allowing the agent to correct the problem and retry. `/goal clear` and tool calls without an active goal do not write output or trigger exit.
 
 ## Configuration
 
@@ -89,7 +104,7 @@ Settings file example (`~/.pi/agent/settings.json`):
 }
 ```
 
-The notification script receives a single argument, for example `Goal completed: <summary>` or `Goal impossible: <reason>`. A leading `~` in the path expands to your home directory. Script failures are reported as a warning notification and never block the agent.
+The notification script receives a single argument, for example `Goal completed: <summary>` or `Goal impossible: <reason>`. A leading `~` in the path expands to your home directory. The goal tool waits for the script to finish (with a 30-second timeout). Script failures are reported as a warning notification and do not prevent goal completion.
 
 ## Development
 
