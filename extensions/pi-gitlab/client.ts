@@ -248,6 +248,22 @@ export class GitLabClient {
 		);
 	}
 
+	/** Creates a standalone top-level comment (an individual note), NOT a
+	 * discussion thread. POSTs to the notes endpoint; replies to the returned
+	 * note still go through addNote with its discussion id. */
+	createNote(
+		project: string,
+		kind: ItemKind,
+		iid: number,
+		body: string,
+	): Promise<Note> {
+		return this.request<Note>(
+			"POST",
+			`/projects/${this.project(project)}/${this.kindPath(kind)}/${iid}/notes`,
+			{ body },
+		);
+	}
+
 	addNote(
 		project: string,
 		kind: ItemKind,

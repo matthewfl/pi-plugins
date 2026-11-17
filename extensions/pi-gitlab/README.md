@@ -67,7 +67,10 @@ When the agent wants to change something, it edits this file: new comments/
 replies are added as `visible="unpublished"` blocks — think of it as
 "staged", like a git index — while description edits change the
 `<description>` body and renames change the root tag's `title="…"`
-attribute. You
+attribute. New top-level comments are staged the same way: a draft
+`<discussion_thread>` starts a resolvable thread, while the same draft with
+`individual="true"` posts a plain standalone comment (an individual note,
+not a thread). You
 can open the file any time; you can even hand-edit it yourself. When the
 agent runs the publish step, you get **one confirmation dialog** summarizing
 the batch ("reply in thread …, new code comment url.ts:82 …, resolve thread

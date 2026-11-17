@@ -32,6 +32,7 @@ export interface PositionSpec {
 export type Action =
 	| { type: "reply"; discussionId: string; body: string; bypassSignature: boolean; source: CommentEl }
 	| { type: "new_discussion"; body: string; position?: PositionSpec; bypassSignature: boolean; source: ThreadEl }
+	| { type: "new_note"; body: string; bypassSignature: boolean; source: ThreadEl }
 	| { type: "resolve"; discussionId: string; resolved: boolean; source: ThreadEl }
 	| { type: "update_title"; title: string; nonOwner: boolean }
 	| { type: "update_description"; body: string; nonOwner: boolean; source: DescriptionEl }
@@ -126,6 +127,21 @@ export function computeActions(
 			}
 			if (!first.body.trim()) {
 				errors.push({ level: "error", message: "draft comment body is empty" });
+				continue;
+			}
+			// individual draft: a standalone top-level comment (individual note),
+			// posted to the notes endpoint — NOT a discussion thread
+			if (thread.individual) {
+				if (thread.file !== undefined || thread.line !== undefined) {
+					errors.push({ level: "error", message: 'individual comment cannot be code-anchored — drop file/line, or remove individual="true" to post a code thread' });
+					continue;
+				}
+				actions.push({
+					type: "new_note",
+					body: first.body,
+					bypassSignature: bypassesSignature(first.body, bypassPatterns),
+					source: thread,
+				});
 				continue;
 			}
 			let position: PositionSpec | undefined;
@@ -335,6 +351,11 @@ export async function executeActions(
 					postedNoteId = Array.isArray(disc?.notes) ? disc.notes[0]?.id : undefined;
 					break;
 				}
+				case "new_note": {
+					postedBody = action.bypassSignature ? action.body.trim() : wrapForPost(opts.signatureHeader, action.body);
+					postedNoteId = (await client.createNote(ref.projectPath, ref.kind, ref.iid, postedBody))?.id;
+					break;
+				}
 				case "resolve": {
 					if (ref.kind !== "mr") throw new Error("issues have no resolvable threads");
 					await client.resolveDiscussion(ref.projectPath, ref.iid, action.discussionId, action.resolved);
@@ -463,7 +484,7 @@ export function reconcileFileText(text: string, outcomes: ExecOutcome[]): string
 		const a = o.action;
 		if (a.type === "reply") {
 			lines = removeDraftComment(lines, a.body, a.discussionId);
-		} else if (a.type === "new_discussion") {
+		} else if (a.type === "new_discussion" || a.type === "new_note") {
 			lines = removeDraftThread(lines, a.body);
 		} else if (a.type === "update_description" && o.postedBody !== undefined) {
 			const desc = scanBlocks(lines, OPEN_DESC, "</description>")[0];
@@ -536,7 +557,9 @@ export function describeAction(a: Action, idx: number): string {
 		case "new_discussion":
 			return a.position
 				? `${n} new code comment ${a.position.file}:${a.position.line} (${a.position.side})${sigNote} — ${firstLine(a.body)}`
-				: `${n} new top-level comment${sigNote} — ${firstLine(a.body)}`;
+				: `${n} new top-level thread${sigNote} — ${firstLine(a.body)}`;
+		case "new_note":
+			return `${n} new individual top-level comment (no thread)${sigNote} — ${firstLine(a.body)}`;
 		case "resolve":
 			return `${n} ${a.resolved ? "resolve" : "unresolve"} thread ${a.discussionId.slice(0, 8)}…`;
 		case "update_description":

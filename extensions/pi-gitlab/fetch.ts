@@ -248,7 +248,14 @@ export function builtInPreamble(): HtmlComment {
 
 function endTemplates(kind: "mr" | "issue"): HtmlComment {
 	const lines = [
-		"<!-- new top-level thread template:",
+		"<!-- new top-level comment (a standalone note, NOT a thread) template:",
+		'<discussion_thread id="unset" visible="unpublished" individual="true">',
+		'<comment author="pi" id="unset" visible="unpublished">',
+		"…new standalone comment…",
+		"</comment>",
+		"</discussion_thread>",
+		"",
+		"new top-level thread template:",
 		'<discussion_thread id="unset" visible="unpublished">',
 		'<comment author="pi" id="unset" visible="unpublished">',
 		"…new standalone comment…",
@@ -298,6 +305,7 @@ export function buildDocument(snapshot: ItemSnapshot, opts: RenderOptions): Docu
 			visible: "published",
 			children: [],
 		};
+		if (d.individual_note) t.individual = true;
 		if (resolvable && ref.kind === "mr") t.resolved = notes.every((n) => !n.resolvable || n.resolved);
 		if (firstWithPos?.position) {
 			const p = firstWithPos.position;

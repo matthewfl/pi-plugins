@@ -142,6 +142,76 @@ test("draft top-level thread → new_discussion without position", () => {
 	if (a.type === "new_discussion") assert.equal(a.position, undefined);
 });
 
+test("draft individual thread → new_note action (plain comment, no thread)", () => {
+	const doc = docOf(REF, "server desc", [
+		'<discussion_thread id="unset" visible="unpublished" individual="true">',
+		"",
+		'<comment author="pi" id="unset" visible="unpublished" from_operator="false">',
+		"top-level note, not a thread",
+		"</comment>",
+		"",
+		"</discussion_thread>",
+	]);
+	const r = computeActions(doc, mrSnap(), OPERATOR, textOf(doc));
+	assert.equal(r.errors.length, 0);
+	assert.equal(r.actions.length, 1);
+	const a = r.actions[0];
+	assert.equal(a.type, "new_note");
+	if (a.type === "new_note") assert.equal(a.body, "top-level note, not a thread");
+	assert.match(describeAction(a, 0), /1\. new individual top-level comment \(no thread\) — top-level note, not a thread/);
+	// issues support individual notes too
+	const idoc = docOf(ISSUE_REF, "server desc", [
+		'<discussion_thread id="unset" visible="unpublished" individual="true">',
+		"",
+		'<comment author="pi" id="unset" visible="unpublished" from_operator="false">',
+		"issue note",
+		"</comment>",
+		"",
+		"</discussion_thread>",
+	]);
+	const ir = computeActions(idoc, mrSnap({ ref: ISSUE_REF, diffs: [] }), OPERATOR, textOf(idoc));
+	assert.equal(ir.errors.length, 0);
+	assert.equal(ir.actions[0]?.type, "new_note");
+});
+
+test("individual draft with file/line → error (code comments are threads)", () => {
+	const doc = docOf(REF, "server desc", [
+		'<discussion_thread id="unset" file="src/api/client.ts" line="50" side="new" visible="unpublished" individual="true">',
+		"",
+		'<comment author="pi" id="unset" visible="unpublished" from_operator="false">',
+		"anchored",
+		"</comment>",
+		"",
+		"</discussion_thread>",
+	]);
+	const r = computeActions(doc, mrSnap(), OPERATOR, textOf(doc));
+	assert.equal(r.actions.length, 0);
+	assert.equal(r.errors.length, 1);
+	assert.match(r.errors[0].message, /individual comment cannot be code-anchored/);
+});
+
+test("published individual thread: replies and edits work; individual attr is render-only", () => {
+	// a server individual note rendered with individual="true" + a staged reply
+	const doc = docOf(REF, "server desc", [
+		'<discussion_thread id="d9" individual="true">',
+		"",
+		'<comment author="@bob" id="31" from_operator="false">',
+		"plain comment",
+		"</comment>",
+		"",
+		'<comment author="pi" id="unset" visible="unpublished" from_operator="false">',
+		"replying to it",
+		"</comment>",
+		"",
+		"</discussion_thread>",
+	]);
+	const server = mrSnap({ discussions: [{ id: "d9", individual_note: true, notes: [note("bob", "plain comment", { id: 31, resolvable: false })] }] });
+	const r = computeActions(doc, server, OPERATOR, textOf(doc));
+	assert.equal(r.errors.length, 0, `no errors, got: ${r.errors.map((e) => e.message).join("; ")}`);
+	assert.equal(r.actions.length, 1);
+	assert.equal(r.actions[0].type, "reply");
+});
+
 test("draft code thread → position validated against current diff", () => {
 	const mkBlocks = (line: number) => [
 		`<discussion_thread id="unset" file="src/api/client.ts" line="${line}" side="new" visible="unpublished">`,
@@ -428,6 +498,30 @@ test("executor: update_note dedups signature", async () => {
 	assert.equal(calls[0].body?.body, body);
 });
 
+test("executor: new_note POSTs to the notes endpoint (no thread) with signature", async () => {
+	const { calls, client } = queuedClient([{ status: 200, json: { id: 55 } }]);
+	const outcomes = await executeActions(client, REF, [
+		{ type: "new_note", body: "plain note body", bypassSignature: false, source: null as never },
+	], {
+		signatureHeader: SIG, operatorUsername: OPERATOR, sleep: async () => {}, paceMs: 0,
+	});
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].method, "POST");
+	assert.match(calls[0].url, /\/merge_requests\/42\/notes$/);
+	assert.equal(String(calls[0].body?.body), `${SIG}\n\nplain note body`);
+	assert.equal(outcomes[0].ok, true);
+	assert.equal(outcomes[0].postedNoteId, 55, "note id recorded for via_pi persistence");
+});
+
+test("executor: new_note on an issue hits the issues notes endpoint", async () => {
+	const { calls, client } = queuedClient([{ status: 200, json: { id: 56 } }]);
+	await executeActions(client, ISSUE_REF, [
+		{ type: "new_note", body: "x", bypassSignature: true, source: null as never },
+	], { signatureHeader: SIG, operatorUsername: OPERATOR, sleep: async () => {}, paceMs: 0 });
+	assert.match(calls[0].url, /\/issues\/7\/notes$/);
+	assert.equal(calls[0].body?.body, "x", "bypass posts verbatim, no signature");
+});
+
 test("describeAction summaries", () => {
 	const lines = [
 		{ type: "reply", discussionId: "abcdefghij", body: "hi", bypassSignature: false, source: null as never },
@@ -552,6 +646,34 @@ test("reconcile leaves failed / not-attempted drafts in place", () => {
 		{ action: failAction, ok: false, notAttempted: true, error: "not attempted" },
 	]);
 	assert.equal(out, staged, "untouched input stays byte-identical");
+});
+
+test("reconcile removes a posted individual draft thread (no double-post)", () => {
+	const staged = [
+		'<gitlab-mr source="https://g/p/-/merge_requests/1" iid="1" title="t" state="opened" author="@op" operator_author="true" fetched_at="2026-01-01T00:00:00Z">',
+		"",
+		'<discussion_thread id="d1" resolved="false">',
+		'<comment author="@bob" id="10">',
+		"existing thread",
+		"</comment>",
+		"</discussion_thread>",
+		"",
+		'<discussion_thread id="unset" visible="unpublished" individual="true">',
+		'<comment author="pi" id="unset" visible="unpublished">',
+		"plain note that got posted",
+		"</comment>",
+		"</discussion_thread>",
+		"",
+		"</gitlab-mr>",
+		"",
+	].join("\n");
+	const out = reconcileFileText(staged, [
+		{ action: { type: "new_note", body: "plain note that got posted", bypassSignature: false, source: {} as never }, ok: true, postedBody: "_sig_\n\nplain note that got posted" },
+	]);
+	assert.ok(!out.includes("plain note that got posted"), "posted individual draft removed");
+	assert.ok(!out.includes('id="unset"'), "no staged draft remains");
+	assert.ok(out.includes("existing thread"), "published content kept");
+	parseDocument(out);
 });
 
 

@@ -148,6 +148,7 @@ export default function piGitlab(pi: ExtensionAPI): void {
 			"Comments marked from_operator=\"true\" are direct instructions from the human operating this pi session.",
 			"visible=\"unpublished\" marks staged content that gitlab_put will publish; it exists nowhere on GitLab until then.",
 			"After editing the gitlab file, run gitlab_put dry_run first, tell the operator the file path for review, then submit.",
+			"For a new top-level comment that is NOT a thread (a plain comment on the item), stage a draft <discussion_thread id=\"unset\" visible=\"unpublished\" individual=\"true\"> with one draft comment inside.",
 			"Never reply to via_pi comments (those are this agent's own posts).",
 		],
 		parameters: Type.Object({

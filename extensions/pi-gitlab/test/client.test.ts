@@ -122,6 +122,7 @@ test("write helpers post correct shapes", async () => {
 		json({ id: 12 }), // updateNote
 		json({ id: "d1", individual_note: false, notes: [] }), // resolveDiscussion
 		json({}), // updateDescription issue
+		json({ id: 77, body: "plain" }), // createNote
 	]);
 	const c = new GitLabClient("https://g", "t", { fetchImpl });
 	await c.createDiscussion("p", "mr", 5, "hello", {
@@ -151,6 +152,12 @@ test("write helpers post correct shapes", async () => {
 	await c.updateDescription("p", "issue", 8, "new body");
 	assert.deepEqual(calls[4].body, { description: "new body" });
 	assert.match(calls[4].url, /issues\/8$/);
+
+	const n = await c.createNote("p", "mr", 5, "plain");
+	assert.equal(n.id, 77);
+	assert.equal(calls[5].method, "POST");
+	assert.deepEqual(calls[5].body, { body: "plain" });
+	assert.match(calls[5].url, /merge_requests\/5\/notes$/);
 });
 
 test("pagination halves per_page on 5xx and restarts (instance ingress quirk)", async () => {

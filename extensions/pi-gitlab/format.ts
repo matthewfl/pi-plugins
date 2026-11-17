@@ -61,6 +61,11 @@ export interface ThreadEl {
 	id: string; // server discussion id or "unset"
 	visible: "published" | "unpublished";
 	resolved?: boolean; // omitted = not a resolvable thread
+	/** true = a standalone top-level comment (individual note), not a thread.
+	 * On published threads this mirrors the server's individual_note flag
+	 * (render-only); on draft threads (id="unset") it stages a new standalone
+	 * comment via the notes endpoint instead of a new discussion. */
+	individual?: boolean;
 	file?: string;
 	line?: number;
 	side?: "new" | "old";
@@ -195,6 +200,7 @@ function serializeBlock(b: TopBlock): string[] {
 			if (t.line !== undefined) parts.push(`line="${t.line}"`);
 			if (t.side !== undefined) parts.push(`side="${t.side}"`);
 			if (t.resolved !== undefined) parts.push(`resolved="${t.resolved}"`);
+			if (t.individual !== undefined) parts.push(`individual="${t.individual}"`);
 			if (t.visible === "unpublished") parts.push(`visible="unpublished"`);
 			const out = [`<discussion_thread ${parts.join(" ")}>`];
 			for (const c of t.children) out.push("", ...serializeChild(c));
@@ -360,7 +366,7 @@ function parseThread(
 ): { thread: ThreadEl; next: number } {
 	const line = start + 1;
 	const a = tag.attrs;
-	requireAttrs(line, "discussion_thread", a, ["id", "file", "line", "side", "resolved", "visible"], ["id"]);
+	requireAttrs(line, "discussion_thread", a, ["id", "file", "line", "side", "resolved", "visible", "individual"], ["id"]);
 	const thread: ThreadEl = {
 		type: "thread",
 		id: unesc(a.id),
@@ -373,6 +379,7 @@ function parseThread(
 		thread.visible = a.visible;
 	}
 	if (a.resolved !== undefined) thread.resolved = boolAttr(line, "discussion_thread", a, "resolved");
+	if (a.individual !== undefined) thread.individual = boolAttr(line, "discussion_thread", a, "individual");
 	if (a.file !== undefined) thread.file = unesc(a.file);
 	if (a.line !== undefined) {
 		const n = Number(a.line);

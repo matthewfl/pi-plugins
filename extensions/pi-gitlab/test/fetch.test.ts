@@ -105,6 +105,24 @@ test("buildDocument: unresolvable threads omit resolved; all-resolved marks true
 	assert.equal(t2?.resolved, true);
 });
 
+test("buildDocument: individual_note discussions render individual=\"true\"; template ships", () => {
+	const s = snap({
+		discussions: [
+			{ id: "indiv", individual_note: true, notes: [note("bob", "plain comment")] as Discussion["notes"] },
+			{ id: "thread", individual_note: false, notes: [note("bob", "q?"), note("alice", "a")] as Discussion["notes"] },
+		],
+	});
+	const doc = buildDocument(s, OPTS);
+	const t1 = doc.blocks.find((b): b is ThreadEl => b.type === "thread" && b.id === "indiv");
+	const t2 = doc.blocks.find((b): b is ThreadEl => b.type === "thread" && b.id === "thread");
+	assert.equal(t1?.individual, true, "server individual note renders individual=\"true\"");
+	assert.equal(t2?.individual, undefined, "multi-note thread is not individual");
+	const out = serializeDocument(doc);
+	assert.match(out, /<discussion_thread id="indiv" resolved="false" individual="true">/);
+	assert.match(out, /new top-level comment \(a standalone note, NOT a thread\) template:/);
+	assert.match(out, /<discussion_thread id="unset" visible="unpublished" individual="true">/);
+});
+
 test("computeCodeContextLines: new side + old side", () => {
 	const diffs = [
 		{

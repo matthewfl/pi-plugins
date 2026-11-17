@@ -242,3 +242,29 @@ test("root non_owner override round-trips (title gate)", () => {
 	assert.equal(reparsed.root.nonOwner, true);
 	assert.equal(serializeDocument(reparsed), out);
 });
+
+// ─── individual (standalone top-level comment, not a thread) ───────
+
+test("individual attribute round-trips on <discussion_thread>", () => {
+	const doc = parseDocument(fixture("mr-basic"));
+	const threads = doc.blocks.filter((b): b is ThreadEl => b.type === "thread");
+	threads[0].individual = true;
+	const out = serializeDocument(doc);
+	assert.match(out, /<discussion_thread id="77cc0192aa31bc09" resolved="false" individual="true">/);
+	const back = parseDocument(out);
+	assert.equal((back.blocks[1] as ThreadEl).individual, true);
+	assert.equal(serializeDocument(back), out, "round-trip stable");
+	// absent stays absent
+	assert.equal((parseDocument(fixture("mr-basic")).blocks[1] as ThreadEl).individual, undefined);
+});
+
+test("individual attribute parses and validates", () => {
+	const mk = (attr: string) =>
+		parseDocument(
+			fixture("mr-basic").replace('<discussion_thread id="77cc0192aa31bc09" resolved="false">',
+				`<discussion_thread id="77cc0192aa31bc09" ${attr}>`),
+		);
+	assert.equal((mk('individual="true"').blocks[1] as ThreadEl).individual, true);
+	assert.equal((mk('individual="false"').blocks[1] as ThreadEl).individual, false);
+	assert.throws(() => mk('individual="yes"'), /individual.*must be "true" or "false"/);
+});

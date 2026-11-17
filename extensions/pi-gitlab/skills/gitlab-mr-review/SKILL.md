@@ -28,7 +28,13 @@ staged changes in one reviewed batch.
   inside the existing `<discussion_thread>` (a commented-out template is
   pre-placed in every thread — copy it, fill it, done).
 - **New top-level comment**: `<discussion_thread id="unset" visible="unpublished">`
-  with one draft comment inside (template at the end of the file).
+  with one draft comment inside (template at the end of the file). By default
+  this starts a **thread** (resolvable, reply-able). For a plain standalone
+  comment — the kind that is not a thread — add `individual="true"` to the
+  draft thread tag (template at the end of the file too): it posts as a
+  single top-level comment. Existing server comments render with
+  `individual="true"` when they are standalone comments; reply to them the
+  same way as any thread.
 - **New code comment**: same, plus `file="path" line="N" side="new|old"`.
   The line must be part of the MR diff; dry_run validates anchors against
   the live diff. Get context from the local git repo (`git diff`, `git log`).
@@ -172,7 +178,10 @@ Avoid:
 ### Use the appropriate GitLab surface
 
 - Reply in a thread when addressing a specific reviewer comment.
-- Use a top-level comment only for an MR-wide result, decision, or question that does not belong to one thread.
+- Use a top-level comment only for an MR-wide result, decision, or question
+  that does not belong to one thread. Prefer `individual="true"` (a plain
+  comment, not a thread) unless the conversation is meant to be resolved or
+  hold back-and-forth replies.
 - Update the MR description with durable information such as scope, behavior, design decisions, verification instructions, or known limitations.
 - Keep routine progress and intermediate work internal.
 - Do not post when there is no useful result yet.
@@ -287,5 +296,7 @@ Fixed in 9b31f2e — `items` is now defaulted before the check.
 
 Attributes: `visible="unpublished"` = staged (absent = published);
 `id="unset"` = no server id yet; `from_operator`/`via_pi` attribution as
-above.
+above; `individual="true"` on a thread = a standalone top-level comment,
+not a threaded discussion (on drafts it posts a plain comment, on
+published threads it mirrors the server).
 
