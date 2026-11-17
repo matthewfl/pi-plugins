@@ -1,6 +1,6 @@
 {
 	"name": "@matthewfl/pi-gitlab",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "GitLab merge request and issue workflows for Pi: fetch, stage edits, review, publish, and watch for changes.",
 	"type": "module",
 	"license": "MIT",

@@ -2,7 +2,8 @@
 // Standalone CLI for non-pi agents. Zero-dependency entry: plain node (≥24 strips types).
 /**
  * pi-gitlab — CLI for GitLab MR/issue workflows for NON-pi agents.
- * Shares ~/.pi/agent/gitlab with the pi extension (auth, config, item
+ * Shares the pi agent data dir (PI_CODING_AGENT_DIR or ~/.pi/agent)/gitlab
+ * with the pi extension (auth, config, item
  * files, sidecars), so a pi agent and a CLI agent never redo auth and
  * the per-item lock keeps two systems off the same item.
  *
@@ -28,7 +29,7 @@ import {
 	staleBaselineIssue,
 } from "../put.ts";
 import { parseDocument, FormatError, findConflictMarkers } from "../format.ts";
-import { dataRoot, itemFilePath } from "../paths.ts";
+import { authPath, dataRoot, itemFilePath } from "../paths.ts";
 import { labelFor, parseGitLabUrl } from "../url.ts";
 import { captureSeen, classifyChanges, formatWatchNotice } from "../watch.ts";
 
@@ -135,7 +136,7 @@ async function cmdLogin(flags: Set<string>): Promise<number> {
 		console.error(`couldn't reach ${baseUrl} (${errLine(e)}) — storing anyway; it will be verified on first use.`);
 	}
 	await saveAuth(baseUrl, { token, username });
-	console.log(JSON.stringify({ baseUrl, username: username ?? null, authFile: "~/.pi/agent/gitlab/config/auth.json" }));
+	console.log(JSON.stringify({ baseUrl, username: username ?? null, authFile: authPath() }));
 	return 0;
 }
 

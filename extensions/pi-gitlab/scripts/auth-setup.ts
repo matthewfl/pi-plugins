@@ -9,6 +9,7 @@
 import * as readline from "node:readline";
 import { GitLabClient, GitLabError } from "../client.ts";
 import { saveAuth } from "../auth.ts";
+import { authPath } from "../paths.ts";
 
 const baseUrl = process.argv[2]?.trim();
 if (!baseUrl || !/^https?:\/\/[^/]+$/.test(baseUrl)) {
@@ -47,7 +48,7 @@ try {
 		new Promise((_, rej) => setTimeout(() => rej(new Error("verification timed out after 8s")), 8000)),
 	])) as { username: string };
 	await saveAuth(baseUrl, { token, username: u.username });
-	console.log(`✓ authenticated as @${u.username} on ${baseUrl} (token stored in ~/.pi/agent/gitlab/config/auth.json)`);
+	console.log(`✓ authenticated as @${u.username} on ${baseUrl} (token stored in ${authPath()})`);
 } catch (e) {
 	if (e instanceof GitLabError && e.status > 0) {
 		console.error(`✗ token rejected: ${e.message}`);

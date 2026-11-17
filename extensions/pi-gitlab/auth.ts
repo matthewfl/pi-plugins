@@ -169,6 +169,6 @@ export function noAuthError(baseUrl: string): string {
 	return (
 		`no GitLab token stored for ${baseUrl}.\n` +
 		`Ask the operator to run: /gitlab-auth ${baseUrl}\n` +
-		`(creates a Personal Access Token with the "api" scope and stores it under ~/.pi/agent/gitlab/config/auth.json)`
+		`(creates a Personal Access Token with the "api" scope and stores it under ${authPath()})`
 	);
 }

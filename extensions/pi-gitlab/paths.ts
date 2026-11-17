@@ -1,12 +1,14 @@
 /**
  * Data layout on disk (plan §1):
  *
- *   ~/.pi/agent/gitlab/
+ *   <agentDir>/gitlab/          (agentDir = PI_CODING_AGENT_DIR or ~/.pi/agent)
  *   ├── config/{auth.json, config.json}
  *   ├── mr|issue/<slug>.gitlab.md (+ .diff)
  *   └── .store/<slug>/{base, prev, state.json}
  *
- * Overridable with PI_GITLAB_DIR (tests, exotic setups).
+ * Root precedence mirrors pi itself (getAgentDir): PI_GITLAB_DIR overrides
+ * everything (tests, exotic setups); otherwise the pi agent dir — i.e.
+ * $PI_CODING_AGENT_DIR when pi runs with a custom agent dir, else ~/.pi/agent.
  */
 
 import * as os from "node:os";
@@ -14,8 +16,16 @@ import * as path from "node:path";
 import type { GitLabItemRef } from "./url.ts";
 import { slugFor } from "./url.ts";
 
+/** The pi agent dir — same resolution as pi's getAgentDir():
+ * $PI_CODING_AGENT_DIR (if set and non-empty) else ~/.pi/agent. */
+export function agentDir(): string {
+	const env = process.env.PI_CODING_AGENT_DIR;
+	if (env?.trim()) return env.trim();
+	return path.join(os.homedir(), ".pi", "agent");
+}
+
 export function dataRoot(): string {
-	return process.env.PI_GITLAB_DIR?.trim() || path.join(os.homedir(), ".pi", "agent", "gitlab");
+	return process.env.PI_GITLAB_DIR?.trim() || path.join(agentDir(), "gitlab");
 }
 
 export function configDir(root: string = dataRoot()): string {

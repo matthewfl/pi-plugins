@@ -39,7 +39,7 @@ three-way merges and diffs).
    creating a Personal Access Token with the `api` scope (it shows the token
    page URL for both newer and older GitLab versions), verifies the token
    against the instance, and stores it with `0600` permissions in
-   `~/.pi/agent/gitlab/config/auth.json`. That's all pi needs.
+   `<agent dir>/gitlab/config/auth.json`. That's all pi needs.
 3. Tell your agent about an MR or issue — paste the URL in conversation.
    The extension figures out which it is from the URL.
 
@@ -48,9 +48,14 @@ three-way merges and diffs).
 When the agent starts working on an MR or issue, a new file appears:
 
 ```
-~/.pi/agent/gitlab/mr/<host>__<project>__<mr-NN>.gitlab.md
-~/.pi/agent/gitlab/issue/<host>__<project>__<issue-NN>.gitlab.md
+<agent dir>/gitlab/mr/<host>__<project>__<mr-NN>.gitlab.md
+<agent dir>/gitlab/issue/<host>__<project>__<issue-NN>.gitlab.md
 ```
+
+where `<agent dir>` is wherever pi keeps its agent data — `$PI_CODING_AGENT_DIR`
+when you run pi with a custom agent dir, else `~/.pi/agent` — the same
+resolution pi itself uses. (`PI_GITLAB_DIR` overrides the gitlab subdirectory
+for tests/exotic setups.)
 
 That file **is** the interface. It contains the item (title, state,
 pipeline status, description) and every discussion thread, including where
@@ -140,7 +145,7 @@ the session and, after 3 consecutive failed ticks, via a message. The CLI
 prints tick errors to stderr. So "why didn't the watch notify?" is one
 list call, not an investigation.
 
-## Configuration reference (`~/.pi/agent/gitlab/config/config.json`)
+## Configuration reference (`<agent dir>/gitlab/config/config.json`)
 
 Example `config.json` with every key set to its default value:
 
